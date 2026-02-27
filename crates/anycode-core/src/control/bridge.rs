@@ -142,12 +142,26 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
                 user_id,
                 command,
                 args,
-            } => self.handle_command(chat_id, user_id, &command, &args).await,
+            } => {
+                if !self.is_user_allowed(user_id) {
+                    self.send_text(chat_id, "You are not authorized to use this bot.")
+                        .await?;
+                    return Ok(());
+                }
+                self.handle_command(chat_id, user_id, &command, &args).await
+            }
             InboundEvent::Message {
                 chat_id,
                 user_id,
                 text,
-            } => self.handle_message(chat_id, user_id, &text).await,
+            } => {
+                if !self.is_user_allowed(user_id) {
+                    self.send_text(chat_id, "You are not authorized to use this bot.")
+                        .await?;
+                    return Ok(());
+                }
+                self.handle_message(chat_id, user_id, &text).await
+            }
             InboundEvent::CallbackQuery {
                 query_id,
                 chat_id,
@@ -155,6 +169,12 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
                 message_id,
                 data,
             } => {
+                if !self.is_user_allowed(user_id) {
+                    self.messaging
+                        .answer_callback(&query_id, "You are not authorized to use this bot.")
+                        .await?;
+                    return Ok(());
+                }
                 self.handle_callback(query_id, chat_id, user_id, message_id, &data)
                     .await
             }
@@ -164,19 +184,10 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
     async fn handle_command(
         &self,
         chat_id: i64,
-        user_id: i64,
+        _user_id: i64,
         command: &str,
         args: &str,
     ) -> Result<()> {
-        // Check allowed users
-        if !self.config.telegram.allowed_users.is_empty()
-            && !self.config.telegram.allowed_users.contains(&user_id)
-        {
-            self.send_text(chat_id, "You are not authorized to use this bot.")
-                .await?;
-            return Ok(());
-        }
-
         match command {
             "task" | "start" => self.cmd_task(chat_id, args).await,
             "status" => self.cmd_status(chat_id).await,
@@ -189,6 +200,11 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
                 Ok(())
             }
         }
+    }
+
+    fn is_user_allowed(&self, user_id: i64) -> bool {
+        self.config.telegram.allowed_users.is_empty()
+            || self.config.telegram.allowed_users.contains(&user_id)
     }
 
     async fn handle_message(&self, chat_id: i64, _user_id: i64, text: &str) -> Result<()> {
@@ -944,6 +960,107 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use crate::config::{
+        AgentsConfig, AppConfig, DatabaseConfig, DockerConfig, SessionConfig, TelegramConfig,
+    };
+    use crate::infra::{SandboxConfig, SandboxHandle, SandboxProvider};
+    use crate::messaging::traits::MessagingProvider;
+
+    #[derive(Default)]
+    struct MockMessaging {
+        sent: tokio::sync::Mutex<Vec<OutboundMessage>>,
+        callbacks: tokio::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl MessagingProvider for MockMessaging {
+        async fn send_message(&self, msg: OutboundMessage) -> Result<i64> {
+            self.sent.lock().await.push(msg);
+            Ok(1)
+        }
+
+        async fn answer_callback(&self, query_id: &str, text: &str) -> Result<()> {
+            self.callbacks
+                .lock()
+                .await
+                .push((query_id.to_string(), text.to_string()));
+            Ok(())
+        }
+
+        async fn subscribe(&self) -> Result<tokio::sync::mpsc::UnboundedReceiver<InboundEvent>> {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok(rx)
+        }
+
+        async fn send_file(&self, _chat_id: i64, _filename: &str, _data: Vec<u8>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct MockSandbox;
+
+    #[async_trait]
+    impl SandboxProvider for MockSandbox {
+        async fn create_sandbox(&self, _config: SandboxConfig) -> Result<SandboxHandle> {
+            Err(crate::error::AnycodeError::Sandbox("not implemented".to_string()))
+        }
+
+        async fn destroy_sandbox(&self, _sandbox_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn is_alive(&self, _sandbox_id: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_logs(&self, _sandbox_id: &str, _tail: usize) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    async fn build_bridge(
+        allowed_users: Vec<i64>,
+    ) -> (
+        Arc<Bridge<MockMessaging, MockSandbox>>,
+        Arc<MockMessaging>,
+    ) {
+        let config = AppConfig {
+            telegram: TelegramConfig {
+                bot_token: "token".to_string(),
+                allowed_users,
+            },
+            docker: DockerConfig {
+                image: "anycode-sandbox:latest".to_string(),
+                port_range_start: 12000,
+                port_range_end: 12100,
+                network: "bridge".to_string(),
+            },
+            database: DatabaseConfig {
+                path: ":memory:".to_string(),
+            },
+            agents: AgentsConfig {
+                default_agent: "claude-code".to_string(),
+                credentials: HashMap::new(),
+            },
+            session: SessionConfig::default(),
+        };
+
+        let repo = Repository::new_in_memory().await.unwrap();
+        let messaging = Arc::new(MockMessaging::default());
+        let bridge = Arc::new(Bridge::new(
+            config,
+            Arc::clone(&messaging),
+            Arc::new(MockSandbox),
+            repo,
+        ));
+
+        (bridge, messaging)
+    }
 
     #[test]
     fn test_extract_repo_url_github() {
@@ -994,5 +1111,46 @@ mod tests {
         buf.last_flush = Instant::now() - Duration::from_secs(1);
         let (_, edit_id) = buf.take_flush().unwrap();
         assert_eq!(edit_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_rejects_unauthorized_plain_messages() {
+        let (bridge, messaging) = build_bridge(vec![7]).await;
+
+        bridge
+            .handle_event(InboundEvent::Message {
+                chat_id: 1,
+                user_id: 99,
+                text: "hello".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let sent = messaging.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].text, "You are not authorized to use this bot.");
+    }
+
+    #[tokio::test]
+    async fn test_rejects_unauthorized_callbacks() {
+        let (bridge, messaging) = build_bridge(vec![7]).await;
+
+        bridge
+            .handle_event(InboundEvent::CallbackQuery {
+                query_id: "qid".to_string(),
+                chat_id: 1,
+                user_id: 99,
+                message_id: 1,
+                data: "q:abc:yes".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let callbacks = messaging.callbacks.lock().await;
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(
+            callbacks[0].1,
+            "You are not authorized to use this bot."
+        );
     }
 }
