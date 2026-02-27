@@ -1,0 +1,30 @@
+[telegram]
+bot_token = "YOUR_BOT_TOKEN_HERE"
+# Restrict access to specific Telegram user IDs (empty = allow all)
+allowed_users = []
+
+[docker]
+image = "anycode-sandbox:latest"
+port_range_start = 12000
+port_range_end = 12100
+network = "bridge"
+
+[database]
+path = "anycode.db"
+
+[agents]
+default_agent = "claude-code"
+
+[agents.credentials.claude-code]
+env = { ANTHROPIC_API_KEY = "sk-ant-..." }
+
+[agents.credentials.codex]
+env = { OPENAI_API_KEY = "sk-..." }
+
+# [agents.credentials.goose]
+# env = { OPENAI_API_KEY = "sk-..." }
+
+[session]
+max_concurrent = 5
+timeout_minutes = 30
+debounce_ms = 500
