@@ -389,13 +389,12 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
     }
 
     async fn cmd_cancel(&self, chat_id: i64, args: &str) -> Result<()> {
+        let sessions = self.repo.get_active_sessions_for_chat(chat_id).await?;
         let session_id = if args.trim().is_empty() {
-            // Cancel most recent
-            self.chat_sessions.get(&chat_id).map(|v| v.clone())
+            sessions.first().map(|s| s.id.clone())
         } else {
             // Find session matching prefix
             let prefix = args.trim();
-            let sessions = self.repo.get_active_sessions_for_chat(chat_id).await?;
             sessions
                 .iter()
                 .find(|s| s.id.starts_with(prefix))
@@ -865,6 +864,22 @@ async fn cleanup_session<M: MessagingProvider, S: SandboxProvider>(
     status: SessionStatus,
 ) {
     bridge.active_sessions.remove(session_id);
+    let chat_keys: Vec<i64> = bridge
+        .chat_sessions
+        .iter()
+        .filter_map(|entry| {
+            if entry.value() == session_id {
+                Some(*entry.key())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for chat_id in chat_keys {
+        bridge
+            .chat_sessions
+            .remove_if(&chat_id, |_, mapped_session_id| mapped_session_id == session_id);
+    }
 
     if !sandbox_id.is_empty() {
         if let Err(e) = bridge.sandbox_provider.destroy_sandbox(sandbox_id).await {
@@ -1226,5 +1241,53 @@ mod tests {
 
         let updated = repo.get_session(&session.id).await.unwrap().unwrap();
         assert_eq!(updated.status, SessionStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_session_removes_chat_mapping() {
+        let (bridge, _repo) = build_bridge_ref().await;
+        bridge
+            .chat_sessions
+            .insert(42, "session-for-chat".to_string());
+
+        cleanup_session(
+            &bridge,
+            "session-for-chat",
+            "",
+            SessionStatus::Completed,
+        )
+        .await;
+
+        assert!(bridge.chat_sessions.get(&42).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cmd_cancel_ignores_stale_chat_mapping() {
+        let (bridge, messaging) = build_bridge(vec![]).await;
+        let session = Session {
+            id: "completed-session".to_string(),
+            chat_id: 101,
+            agent: "claude-code".to_string(),
+            prompt: "test".to_string(),
+            repo_url: None,
+            sandbox_id: None,
+            sandbox_port: None,
+            session_api_id: None,
+            status: SessionStatus::Completed,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        bridge.repo.create_session(&session).await.unwrap();
+        bridge
+            .chat_sessions
+            .insert(session.chat_id, session.id.clone());
+
+        bridge.cmd_cancel(session.chat_id, "").await.unwrap();
+
+        let updated = bridge.repo.get_session(&session.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, SessionStatus::Completed);
+
+        let sent = messaging.sent.lock().await;
+        assert_eq!(sent.last().unwrap().text, "No active session to cancel.");
     }
 }
