@@ -211,6 +211,18 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         // Route plain text to the most recent active session in this chat
         if let Some(session_id) = self.chat_sessions.get(&chat_id).map(|v| v.clone()) {
             if let Some(active) = self.active_sessions.get(&session_id) {
+                let unresolved = self.repo.get_unresolved_for_session(&session_id).await?;
+                if let Some((pi_id, question_id)) =
+                    get_pending_free_form_question(&unresolved)
+                {
+                    active
+                        .sandbox_client
+                        .reply_question(&question_id, text)
+                        .await?;
+                    self.repo.resolve_pending_interaction(&pi_id).await?;
+                    return Ok(());
+                }
+
                 active
                     .sandbox_client
                     .send_message(&session_id, text)
@@ -750,7 +762,11 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                             question_id: Some(question_id),
                             permission_id: None,
                             telegram_message_id: Some(msg_id),
-                            payload: None,
+                            payload: if options.is_empty() {
+                                Some("free_form".to_string())
+                            } else {
+                                None
+                            },
                             resolved: false,
                             created_at: chrono::Utc::now().to_rfc3339(),
                         };
@@ -947,6 +963,24 @@ fn floor_char_boundary(text: &str, max_len: usize) -> usize {
     } else {
         idx
     }
+}
+
+fn get_pending_free_form_question(
+    interactions: &[PendingInteraction],
+) -> Option<(String, String)> {
+    interactions
+        .iter()
+        .find_map(|pi| {
+            if pi.kind == InteractionKind::Question
+                && pi.payload.as_deref() == Some("free_form")
+            {
+                pi.question_id
+                    .as_ref()
+                    .map(|question_id| (pi.id.clone(), question_id.clone()))
+            } else {
+                None
+            }
+        })
 }
 
 /// Extract a GitHub/GitLab repo URL from text.
@@ -1212,6 +1246,54 @@ mod tests {
         buf.last_flush = Instant::now() - Duration::from_secs(1);
         let (_, edit_id) = buf.take_flush().unwrap();
         assert_eq!(edit_id, Some(42));
+    }
+
+    #[test]
+    fn test_get_pending_free_form_question_finds_marked_question() {
+        let interactions = vec![
+            PendingInteraction {
+                id: "pi-1".to_string(),
+                session_id: "s1".to_string(),
+                kind: InteractionKind::Permission,
+                question_id: None,
+                permission_id: Some("perm-1".to_string()),
+                telegram_message_id: None,
+                payload: None,
+                resolved: false,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+            },
+            PendingInteraction {
+                id: "pi-2".to_string(),
+                session_id: "s1".to_string(),
+                kind: InteractionKind::Question,
+                question_id: Some("q-1".to_string()),
+                permission_id: None,
+                telegram_message_id: None,
+                payload: Some("free_form".to_string()),
+                resolved: false,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+            },
+        ];
+
+        let selected = get_pending_free_form_question(&interactions);
+        assert_eq!(selected, Some(("pi-2".to_string(), "q-1".to_string())));
+    }
+
+    #[test]
+    fn test_get_pending_free_form_question_ignores_non_free_form() {
+        let interactions = vec![PendingInteraction {
+            id: "pi-1".to_string(),
+            session_id: "s1".to_string(),
+            kind: InteractionKind::Question,
+            question_id: Some("q-1".to_string()),
+            permission_id: None,
+            telegram_message_id: None,
+            payload: None,
+            resolved: false,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        }];
+
+        assert_eq!(get_pending_free_form_question(&interactions), None);
     }
 
     #[tokio::test]
