@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize Docker provider
     let docker_provider = DockerProvider::new(
         &config.docker.image,
+        &config.docker.network,
         config.docker.port_range_start,
         config.docker.port_range_end,
     )

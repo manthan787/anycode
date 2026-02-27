@@ -47,17 +47,24 @@ impl PortAllocator {
 
 pub struct DockerProvider {
     docker: Docker,
-    image: String,
+    default_image: String,
+    network: String,
     port_allocator: Arc<PortAllocator>,
 }
 
 impl DockerProvider {
-    pub fn new(image: &str, port_start: u16, port_end: u16) -> Result<Self> {
+    pub fn new(
+        default_image: &str,
+        network: &str,
+        port_start: u16,
+        port_end: u16,
+    ) -> Result<Self> {
         let docker =
             Docker::connect_with_local_defaults().map_err(AnycodeError::Docker)?;
         Ok(Self {
             docker,
-            image: image.to_string(),
+            default_image: default_image.to_string(),
+            network: network.to_string(),
             port_allocator: Arc::new(PortAllocator::new(port_start, port_end)),
         })
     }
@@ -84,6 +91,7 @@ impl DockerProvider {
 impl SandboxProvider for DockerProvider {
     async fn create_sandbox(&self, config: SandboxConfig) -> Result<SandboxHandle> {
         let port = self.port_allocator.allocate()?;
+        let image = resolve_image(&self.default_image, &config.image);
 
         let mut env_vars: Vec<String> = config
             .env
@@ -98,19 +106,7 @@ impl SandboxProvider for DockerProvider {
         }
 
         let container_port = "2468/tcp";
-        let mut port_bindings = HashMap::new();
-        port_bindings.insert(
-            container_port.to_string(),
-            Some(vec![PortBinding {
-                host_ip: Some("127.0.0.1".to_string()),
-                host_port: Some(port.to_string()),
-            }]),
-        );
-
-        let host_config = HostConfig {
-            port_bindings: Some(port_bindings),
-            ..Default::default()
-        };
+        let host_config = build_host_config(port, container_port, &self.network);
 
         let mut exposed_ports: HashMap<String, HashMap<(), ()>> = HashMap::new();
         exposed_ports.insert(container_port.to_string(), HashMap::new());
@@ -129,7 +125,7 @@ impl SandboxProvider for DockerProvider {
         );
 
         let container_config = Config {
-            image: Some(self.image.clone()),
+            image: Some(image.clone()),
             env: Some(env_vars),
             host_config: Some(host_config),
             exposed_ports: Some(exposed_ports),
@@ -144,7 +140,7 @@ impl SandboxProvider for DockerProvider {
 
         info!(
             "Creating container {container_name} with image {} on port {port}",
-            self.image
+            image
         );
 
         let response = self
@@ -220,5 +216,54 @@ impl SandboxProvider for DockerProvider {
         }
 
         Ok(output)
+    }
+}
+
+fn resolve_image(default_image: &str, requested_image: &str) -> String {
+    if requested_image.trim().is_empty() {
+        default_image.to_string()
+    } else {
+        requested_image.to_string()
+    }
+}
+
+fn build_host_config(port: u16, container_port: &str, network: &str) -> HostConfig {
+    let mut port_bindings = HashMap::new();
+    port_bindings.insert(
+        container_port.to_string(),
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: Some(port.to_string()),
+        }]),
+    );
+
+    HostConfig {
+        port_bindings: Some(port_bindings),
+        network_mode: Some(network.to_string()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_image_prefers_requested() {
+        let image = resolve_image("default:latest", "custom:v1");
+        assert_eq!(image, "custom:v1");
+    }
+
+    #[test]
+    fn test_resolve_image_falls_back_to_default() {
+        let image = resolve_image("default:latest", "   ");
+        assert_eq!(image, "default:latest");
+    }
+
+    #[test]
+    fn test_build_host_config_sets_network_mode() {
+        let host_config = build_host_config(12000, "2468/tcp", "anycode-net");
+        assert_eq!(host_config.network_mode, Some("anycode-net".to_string()));
+        assert!(host_config.port_bindings.is_some());
     }
 }
