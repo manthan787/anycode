@@ -1,0 +1,48 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    nodejs \
+    npm \
+    python3 \
+    python3-pip \
+    build-essential \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22 (LTS) via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# Install Codex CLI
+RUN npm install -g @openai/codex
+
+# Install sandbox-agent
+RUN curl -fsSL https://raw.githubusercontent.com/nichochar/open-agent-platform/main/install.sh | bash \
+    || echo "sandbox-agent install script not available, will install manually"
+
+# If install script didn't work, try direct binary download
+RUN which sandbox-agent || \
+    (curl -fsSL -o /usr/local/bin/sandbox-agent \
+     https://github.com/nichochar/open-agent-platform/releases/latest/download/sandbox-agent-linux-amd64 \
+     && chmod +x /usr/local/bin/sandbox-agent) \
+    || echo "WARNING: sandbox-agent binary not available yet"
+
+# Create workspace directory
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
+# Expose sandbox agent port
+EXPOSE 2468
+
+# Entrypoint: start sandbox-agent server
+# Credentials are passed via env vars at container creation time
+ENTRYPOINT ["sandbox-agent", "server", "--host", "0.0.0.0", "--port", "2468", "--no-token"]
