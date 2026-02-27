@@ -34,14 +34,27 @@ impl PortAllocator {
     }
 
     fn allocate(&self) -> Result<u16> {
-        let port = self.next.fetch_add(1, Ordering::SeqCst);
-        if port >= self.end {
-            self.next.store(self.start, Ordering::SeqCst);
-            return Err(AnycodeError::Sandbox(
-                "port range exhausted, wrapping around".into(),
-            ));
+        loop {
+            let current = self.next.load(Ordering::SeqCst);
+            let port = if current >= self.end {
+                self.start
+            } else {
+                current
+            };
+            let next = if port + 1 >= self.end {
+                self.start
+            } else {
+                port + 1
+            };
+
+            if self
+                .next
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Ok(port);
+            }
         }
-        Ok(port)
     }
 }
 
@@ -265,5 +278,14 @@ mod tests {
         let host_config = build_host_config(12000, "2468/tcp", "anycode-net");
         assert_eq!(host_config.network_mode, Some("anycode-net".to_string()));
         assert!(host_config.port_bindings.is_some());
+    }
+
+    #[test]
+    fn test_port_allocator_wraps_without_error() {
+        let allocator = PortAllocator::new(12000, 12002);
+
+        assert_eq!(allocator.allocate().unwrap(), 12000);
+        assert_eq!(allocator.allocate().unwrap(), 12001);
+        assert_eq!(allocator.allocate().unwrap(), 12000);
     }
 }
