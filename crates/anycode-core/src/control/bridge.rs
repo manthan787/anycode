@@ -664,14 +664,9 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
             let mut buf = flush_active.delta_buffer.lock().await;
             if buf.should_flush() {
                 if let Some((text, edit_id)) = buf.take_flush() {
-                    let msg = OutboundMessage {
-                        chat_id,
-                        text: truncate_message(&text),
-                        edit_message_id: edit_id,
-                        buttons: vec![],
-                    };
-                    match flush_messaging.send_message(msg).await {
-                        Ok(mid) => buf.set_message_id(mid),
+                    match send_stream_chunks(&flush_messaging, chat_id, &text, edit_id).await {
+                        Ok(Some(mid)) => buf.set_message_id(mid),
+                        Ok(None) => {}
                         Err(e) => warn!("Failed to flush delta: {e}"),
                     }
                 }
@@ -706,13 +701,10 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                             buf.append(c);
                         }
                         if let Some((text, edit_id)) = buf.take_flush() {
-                            let msg = OutboundMessage {
-                                chat_id,
-                                text: truncate_message(&text),
-                                edit_message_id: edit_id,
-                                buttons: vec![],
-                            };
-                            if let Ok(mid) = bridge.messaging.send_message(msg).await {
+                            if let Ok(Some(mid)) =
+                                send_stream_chunks(&bridge.messaging, chat_id, &text, edit_id)
+                                    .await
+                            {
                                 buf.set_message_id(mid);
                             }
                         }
@@ -917,12 +909,43 @@ async fn send_text<M: MessagingProvider>(
         .await
 }
 
-/// Truncate message to fit Telegram's 4096 char limit.
-fn truncate_message(text: &str) -> String {
-    if text.len() <= 4096 {
-        text.to_string()
+async fn send_stream_chunks<M: MessagingProvider>(
+    messaging: &Arc<M>,
+    chat_id: i64,
+    text: &str,
+    edit_message_id: Option<i64>,
+) -> Result<Option<i64>> {
+    let chunks = split_message(text, 4096);
+    let mut last_message_id = None;
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let message_id = messaging
+            .send_message(OutboundMessage {
+                chat_id,
+                text: chunk.clone(),
+                edit_message_id: if idx == 0 { edit_message_id } else { None },
+                buttons: vec![],
+            })
+            .await?;
+        last_message_id = Some(message_id);
+    }
+
+    Ok(last_message_id)
+}
+
+fn floor_char_boundary(text: &str, max_len: usize) -> usize {
+    if text.len() <= max_len {
+        return text.len();
+    }
+
+    let mut idx = max_len;
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    if idx == 0 {
+        text.chars().next().map(|c| c.len_utf8()).unwrap_or(0)
     } else {
-        format!("{}...(truncated)", &text[..4080])
+        idx
     }
 }
 
@@ -961,6 +984,9 @@ fn extract_repo_url(text: &str) -> Option<String> {
 
 /// Split a long message into chunks that fit Telegram's limit.
 pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if max_len == 0 {
+        return vec![];
+    }
     if text.len() <= max_len {
         return vec![text.to_string()];
     }
@@ -974,10 +1000,12 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        // Try to split at a newline
-        let split_at = remaining[..max_len]
-            .rfind('\n')
-            .unwrap_or(max_len);
+        let window_end = floor_char_boundary(remaining, max_len);
+        let window = &remaining[..window_end];
+        let mut split_at = window.rfind('\n').unwrap_or(window_end);
+        if split_at == 0 {
+            split_at = window_end;
+        }
 
         chunks.push(remaining[..split_at].to_string());
         remaining = &remaining[split_at..].trim_start_matches('\n');
@@ -1156,6 +1184,15 @@ mod tests {
     }
 
     #[test]
+    fn test_split_message_unicode_safe() {
+        let text = "🙂".repeat(3000);
+        let chunks = split_message(&text, 4096);
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 4096));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
     fn test_delta_buffer() {
         let mut buf = DeltaBuffer::new(500);
         buf.append("hello ");
@@ -1216,6 +1253,23 @@ mod tests {
             callbacks[0].1,
             "You are not authorized to use this bot."
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_stream_chunks_first_chunk_can_edit() {
+        let messaging = Arc::new(MockMessaging::default());
+        let text = "a".repeat(5000);
+
+        let last_id = send_stream_chunks(&messaging, 1, &text, Some(77))
+            .await
+            .unwrap();
+
+        let sent = messaging.sent.lock().await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].edit_message_id, Some(77));
+        assert_eq!(sent[1].edit_message_id, None);
+        assert!(sent.iter().all(|msg| msg.text.len() <= 4096));
+        assert_eq!(last_id, Some(1));
     }
 
     #[tokio::test]
