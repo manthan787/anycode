@@ -108,6 +108,26 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn update_session_status_if_active(
+        &self,
+        id: &str,
+        status: SessionStatus,
+    ) -> Result<bool> {
+        let id = id.to_string();
+        self.conn
+            .call(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE sessions
+                     SET status = ?1, updated_at = datetime('now')
+                     WHERE id = ?2 AND status IN ('pending', 'starting', 'running')",
+                    rusqlite::params![status.as_str(), id],
+                )?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn update_session_sandbox(
         &self,
         id: &str,
@@ -435,6 +455,66 @@ mod tests {
 
         let fetched = repo.get_session("test-2").await.unwrap().unwrap();
         assert_eq!(fetched.status, SessionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_update_session_status_if_active() {
+        let repo = Repository::new_in_memory().await.unwrap();
+
+        let session = Session {
+            id: "test-2b".to_string(),
+            chat_id: 12345,
+            agent: "claude-code".to_string(),
+            prompt: "fix".to_string(),
+            repo_url: None,
+            sandbox_id: None,
+            sandbox_port: None,
+            session_api_id: None,
+            status: SessionStatus::Pending,
+            created_at: "2024-01-01T00:00:00".to_string(),
+            updated_at: "2024-01-01T00:00:00".to_string(),
+        };
+
+        repo.create_session(&session).await.unwrap();
+
+        let changed = repo
+            .update_session_status_if_active("test-2b", SessionStatus::Running)
+            .await
+            .unwrap();
+        assert!(changed);
+
+        let fetched = repo.get_session("test-2b").await.unwrap().unwrap();
+        assert_eq!(fetched.status, SessionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_update_session_status_if_active_does_not_override_terminal() {
+        let repo = Repository::new_in_memory().await.unwrap();
+
+        let session = Session {
+            id: "test-2c".to_string(),
+            chat_id: 12345,
+            agent: "claude-code".to_string(),
+            prompt: "fix".to_string(),
+            repo_url: None,
+            sandbox_id: None,
+            sandbox_port: None,
+            session_api_id: None,
+            status: SessionStatus::Completed,
+            created_at: "2024-01-01T00:00:00".to_string(),
+            updated_at: "2024-01-01T00:00:00".to_string(),
+        };
+
+        repo.create_session(&session).await.unwrap();
+
+        let changed = repo
+            .update_session_status_if_active("test-2c", SessionStatus::Failed)
+            .await
+            .unwrap();
+        assert!(!changed);
+
+        let fetched = repo.get_session("test-2c").await.unwrap().unwrap();
+        assert_eq!(fetched.status, SessionStatus::Completed);
     }
 
     #[tokio::test]

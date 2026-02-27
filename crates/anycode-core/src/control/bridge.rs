@@ -681,6 +681,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
     });
 
     // Process events
+    let mut final_status = SessionStatus::Failed;
     while let Some(result) = event_rx.recv().await {
         match result {
             Ok(event) => {
@@ -806,11 +807,13 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                     }
                     SandboxEvent::SessionEnded { .. } => {
                         info!("Session {session_id} ended");
+                        final_status = SessionStatus::Completed;
                         send_text(&bridge.messaging, chat_id, "Session completed.").await?;
                         break;
                     }
                     SandboxEvent::Error { message, .. } => {
                         error!("Session {session_id} error: {message}");
+                        final_status = SessionStatus::Failed;
                         send_text(
                             &bridge.messaging,
                             chat_id,
@@ -824,6 +827,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
             }
             Err(e) => {
                 error!("SSE stream error for session {session_id}: {e}");
+                final_status = SessionStatus::Failed;
 
                 // Check if container is still alive
                 if let Some(ref sid) = session.sandbox_id {
@@ -847,7 +851,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
         &bridge,
         &session_id,
         session.sandbox_id.as_deref().unwrap_or(""),
-        SessionStatus::Completed,
+        final_status,
     )
     .await;
 
@@ -868,8 +872,18 @@ async fn cleanup_session<M: MessagingProvider, S: SandboxProvider>(
         }
     }
 
-    if let Err(e) = bridge.repo.update_session_status(session_id, status).await {
-        error!("Failed to update session status: {e}");
+    match bridge
+        .repo
+        .update_session_status_if_active(session_id, status)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!("Session {session_id} already terminal, skipping status update");
+        }
+        Err(e) => {
+            error!("Failed to update session status: {e}");
+        }
     }
 }
 
@@ -1062,6 +1076,41 @@ mod tests {
         (bridge, messaging)
     }
 
+    async fn build_bridge_ref() -> (BridgeRef<MockMessaging, MockSandbox>, Repository) {
+        let config = AppConfig {
+            telegram: TelegramConfig {
+                bot_token: "token".to_string(),
+                allowed_users: vec![],
+            },
+            docker: DockerConfig {
+                image: "anycode-sandbox:latest".to_string(),
+                port_range_start: 12000,
+                port_range_end: 12100,
+                network: "bridge".to_string(),
+            },
+            database: DatabaseConfig {
+                path: ":memory:".to_string(),
+            },
+            agents: AgentsConfig {
+                default_agent: "claude-code".to_string(),
+                credentials: HashMap::new(),
+            },
+            session: SessionConfig::default(),
+        };
+
+        let repo = Repository::new_in_memory().await.unwrap();
+        let bridge = BridgeRef {
+            config,
+            messaging: Arc::new(MockMessaging::default()),
+            sandbox_provider: Arc::new(MockSandbox),
+            repo: repo.clone(),
+            active_sessions: Arc::new(DashMap::new()),
+            chat_sessions: Arc::new(DashMap::new()),
+        };
+
+        (bridge, repo)
+    }
+
     #[test]
     fn test_extract_repo_url_github() {
         let url = extract_repo_url("fix bug in https://github.com/org/repo please");
@@ -1152,5 +1201,30 @@ mod tests {
             callbacks[0].1,
             "You are not authorized to use this bot."
         );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_session_does_not_override_terminal_status() {
+        let (bridge, repo) = build_bridge_ref().await;
+
+        let session = Session {
+            id: "session-1".to_string(),
+            chat_id: 1,
+            agent: "claude-code".to_string(),
+            prompt: "test".to_string(),
+            repo_url: None,
+            sandbox_id: None,
+            sandbox_port: None,
+            session_api_id: None,
+            status: SessionStatus::Cancelled,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        repo.create_session(&session).await.unwrap();
+
+        cleanup_session(&bridge, &session.id, "", SessionStatus::Completed).await;
+
+        let updated = repo.get_session(&session.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, SessionStatus::Cancelled);
     }
 }
