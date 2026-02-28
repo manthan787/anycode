@@ -5,7 +5,7 @@
   </p>
   <p align="center">
     Dispatch tasks to Claude Code, Codex, or Goose from a chat message.<br>
-    Anycode spins up a sandboxed container, streams output back, handles Q&A via buttons, and cleans up when done.
+    Anycode spins up an isolated sandbox (Docker locally or ECS Fargate in cloud), streams output back, handles Q&A via buttons, and cleans up when done.
   </p>
 </p>
 
@@ -26,7 +26,7 @@ No single tool lets you dispatch coding tasks from a messaging app, spin up a sa
 
 - **Message-driven** &mdash; start tasks from Telegram (Slack/Discord planned)
 - **Agent-agnostic** &mdash; Claude Code, Codex, Goose, or any agent behind Rivet's Sandbox Agent SDK
-- **Fully sandboxed** &mdash; each task runs in an ephemeral Docker container
+- **Fully sandboxed** &mdash; each task runs in an ephemeral Docker container or ECS Fargate task
 - **Bidirectional** &mdash; questions and permission requests appear as inline buttons; your replies go back to the agent
 - **Streaming** &mdash; see the agent's output as it types, debounced to avoid rate limits
 
@@ -37,7 +37,8 @@ No single tool lets you dispatch coding tasks from a messaging app, spin up a sa
 ### Prerequisites
 
 - **Rust** 1.75+ (for building)
-- **Docker** running locally
+- **Docker** running locally (if `sandbox.provider = "docker"`)
+- **AWS account + IAM credentials** (if `sandbox.provider = "ecs"`)
 - A **Telegram Bot Token** (get one from [@BotFather](https://t.me/BotFather))
 - API keys for at least one agent (e.g. `ANTHROPIC_API_KEY` for Claude Code)
 
@@ -90,12 +91,12 @@ Open your bot in Telegram and send:
 ## How It Works
 
 ```
-You (Telegram)                    Anycode Daemon                     Docker
-━━━━━━━━━━━━━━                    ━━━━━━━━━━━━━━                     ━━━━━━
+You (Telegram)                    Anycode Daemon                     Sandbox Backend
+━━━━━━━━━━━━━━                    ━━━━━━━━━━━━━━                     ━━━━━━━━━━━━━━━
 
 /task claude-code                 Parse command
   fix the auth bug ──────────────▶ Check limits
-                                  Create container  ──────────────▶  🐳 sandbox-agent
+                                  Create sandbox    ──────────────▶  🐳 Docker or ☁️ ECS
                                   Wait for healthy  ◀──────────────  + claude-code
                                   Create session
                                   Send prompt       ──────────────▶  Agent starts working
@@ -106,10 +107,10 @@ You (Telegram)                    Anycode Daemon                     Docker
   [Press button]    ──────────────▶ Reply to agent  ──────────────▶  Agent continues
                                        ◀── SSE stream ────────────
   "Done! Here's     ◀──────────── Final message
-   the fix."                      Destroy container ──────────────▶  🗑️ cleaned up
+   the fix."                      Destroy sandbox   ──────────────▶  🗑️ cleaned up
 ```
 
-Each session is fully isolated: its own container, its own port, its own event stream. Containers are automatically destroyed on completion, failure, timeout, or cancellation.
+Each session is fully isolated: its own container/task, its own API endpoint, and its own event stream. Sandboxes are automatically destroyed on completion, failure, timeout, or cancellation.
 
 ---
 
@@ -145,11 +146,29 @@ Each session is fully isolated: its own container, its own port, its own event s
 bot_token = "YOUR_BOT_TOKEN"           # Required
 allowed_users = []                      # Telegram user IDs (empty = allow all)
 
+[sandbox]
+provider = "docker"                     # "docker" or "ecs"
+
 [docker]
 image = "anycode-sandbox:latest"        # Sandbox container image
 port_range_start = 12000                # Host port range for containers
 port_range_end = 12100
 network = "bridge"
+
+[ecs]
+cluster = "anycode-cluster"             # Required when provider = "ecs"
+task_definition = "anycode-task:1"      # Required when provider = "ecs"
+subnets = ["subnet-abc123"]             # Required when provider = "ecs"
+security_groups = ["sg-abc123"]
+assign_public_ip = true
+container_port = 2468
+startup_timeout_secs = 120
+poll_interval_ms = 1000
+region = "us-west-2"
+platform_version = "LATEST"
+container_name = "anycode-sandbox"      # Optional; inferred from task def if empty
+log_group = "/ecs/anycode"              # Optional, for get_logs
+log_stream_prefix = "anycode"           # Optional
 
 [database]
 path = "anycode.db"                     # SQLite database file
@@ -172,7 +191,15 @@ timeout_minutes = 30                    # Auto-cancel after this duration
 debounce_ms = 500                       # Streaming output flush interval
 ```
 
-Agent credentials are injected as environment variables into the container at creation time. They are never baked into the Docker image. Keep `config.toml` out of version control.
+Agent credentials are injected as environment variables into the sandbox at creation time. They are never baked into images. Keep `config.toml` out of version control.
+
+### ECS Fargate Notes
+
+- Anycode launches one Fargate task per `/task` via `RunTask`.
+- It waits for task state `RUNNING`, resolves the ENI IP, then connects to the sandbox agent on `ecs.container_port`.
+- `ANYCODE_AGENT`, `ANYCODE_REPO`, and agent credentials are passed as ECS container environment overrides.
+- `ecs.container_name` is optional. If omitted, Anycode infers it from the ECS task definition.
+- `get_logs` uses CloudWatch when `ecs.log_group` is configured.
 
 ---
 
@@ -186,7 +213,7 @@ anycode/
 │   │   ├── error.rs            Unified error types (thiserror)
 │   │   ├── db/                 SQLite persistence (tokio-rusqlite)
 │   │   ├── messaging/          MessagingProvider trait + Telegram impl
-│   │   ├── infra/              SandboxProvider trait + Docker impl
+│   │   ├── infra/              SandboxProvider trait + Docker/ECS impls
 │   │   ├── sandbox/            HTTP client + SSE stream for sandbox agent
 │   │   ├── control/            Telegram ↔ Sandbox bridge orchestration
 │   │   └── session/            Timeout watchdog + orphan cleanup
@@ -203,8 +230,8 @@ The two core extension points are traits, making it straightforward to add new m
 **`MessagingProvider`** &mdash; send/edit messages, handle callbacks, subscribe to events, upload files.
 Currently implemented for Telegram. Extensible to Slack, Discord, Matrix.
 
-**`SandboxProvider`** &mdash; create/destroy containers, health check, fetch logs.
-Currently implemented for Docker. Extensible to Kubernetes, EC2, E2B.
+**`SandboxProvider`** &mdash; create/destroy sandboxes, health check, fetch logs.
+Currently implemented for Docker and AWS ECS Fargate. Extensible to Kubernetes and other backends.
 
 ### Concurrency model
 
@@ -260,14 +287,14 @@ cargo check
 
 ### Tests
 
-12 unit tests covering config validation, database CRUD, message splitting, URL extraction, and delta buffering. All tests use in-memory SQLite and are fully isolated.
+33 unit tests covering config validation (including ECS), database CRUD, bridge behavior, message splitting, URL extraction, delta buffering, and infra helpers. All tests use in-memory SQLite and are fully isolated.
 
 ---
 
 ## Roadmap
 
 - [ ] Slack and Discord messaging providers
-- [ ] Kubernetes / cloud sandbox providers
+- [ ] Kubernetes sandbox provider
 - [ ] ACP (JSON-RPC) protocol support alongside OpenCode REST
 - [ ] Git repo cloning into sandbox (private repos via token)
 - [ ] File output as Telegram document uploads

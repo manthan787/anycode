@@ -10,6 +10,8 @@ use anycode_core::config::AppConfig;
 use anycode_core::control::bridge::Bridge;
 use anycode_core::db::Repository;
 use anycode_core::infra::docker::DockerProvider;
+use anycode_core::infra::ecs::{EcsFargateProvider, EcsProviderConfig};
+use anycode_core::infra::provider::AnySandboxProvider;
 use anycode_core::messaging::telegram::TelegramProvider;
 use anycode_core::session::manager::SessionWatchdog;
 
@@ -42,15 +44,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to initialize database")?;
 
-    // Initialize Docker provider
-    let docker_provider = DockerProvider::new(
-        &config.docker.image,
-        &config.docker.network,
-        config.docker.port_range_start,
-        config.docker.port_range_end,
-    )
-    .context("Failed to connect to Docker")?;
-    let docker_provider = Arc::new(docker_provider);
+    let sandbox_provider = Arc::new(
+        build_sandbox_provider(&config)
+            .await
+            .context("Failed to initialize sandbox provider")?,
+    );
 
     // Initialize Telegram provider
     let telegram = TelegramProvider::new(&config.telegram.bot_token);
@@ -63,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let mut watchdog = SessionWatchdog::new(
         config.clone(),
         repo.clone(),
-        Arc::clone(&docker_provider),
+        Arc::clone(&sandbox_provider),
         shutdown_rx,
     );
     let watchdog_handle = tokio::spawn(async move {
@@ -74,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let bridge = Arc::new(Bridge::new(
         config.clone(),
         Arc::clone(&telegram),
-        Arc::clone(&docker_provider),
+        Arc::clone(&sandbox_provider),
         repo.clone(),
     ));
 
@@ -102,4 +100,44 @@ async fn main() -> anyhow::Result<()> {
     info!("Anycode daemon stopped");
 
     Ok(())
+}
+
+async fn build_sandbox_provider(config: &AppConfig) -> anyhow::Result<AnySandboxProvider> {
+    match config.sandbox.provider.as_str() {
+        "docker" => {
+            let provider = DockerProvider::new(
+                &config.docker.image,
+                &config.docker.network,
+                config.docker.port_range_start,
+                config.docker.port_range_end,
+            )
+            .context("Failed to connect to Docker")?;
+            Ok(provider.into())
+        }
+        "ecs" => {
+            let ecs_config = EcsProviderConfig {
+                cluster: config.ecs.cluster.clone(),
+                task_definition: config.ecs.task_definition.clone(),
+                subnets: config.ecs.subnets.clone(),
+                security_groups: config.ecs.security_groups.clone(),
+                assign_public_ip: config.ecs.assign_public_ip,
+                container_port: config.ecs.container_port,
+                startup_timeout_secs: config.ecs.startup_timeout_secs,
+                poll_interval_ms: config.ecs.poll_interval_ms,
+                region: config.ecs.region.clone(),
+                platform_version: config.ecs.platform_version.clone(),
+                container_name: config.ecs.container_name.clone(),
+                log_group: config.ecs.log_group.clone(),
+                log_stream_prefix: config.ecs.log_stream_prefix.clone(),
+            };
+
+            let provider = EcsFargateProvider::new(ecs_config)
+                .await
+                .context("Failed to initialize ECS provider")?;
+            Ok(provider.into())
+        }
+        other => anyhow::bail!(
+            "Unsupported sandbox.provider '{other}'. Expected 'docker' or 'ecs'."
+        ),
+    }
 }

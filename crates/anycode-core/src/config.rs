@@ -6,11 +6,29 @@ use crate::error::{AnycodeError, Result};
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub sandbox: SandboxRuntimeConfig,
     pub docker: DockerConfig,
+    #[serde(default)]
+    pub ecs: EcsConfig,
     pub database: DatabaseConfig,
     pub agents: AgentsConfig,
     #[serde(default)]
     pub session: SessionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SandboxRuntimeConfig {
+    #[serde(default = "default_sandbox_provider")]
+    pub provider: String,
+}
+
+impl Default for SandboxRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_sandbox_provider(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +48,56 @@ pub struct DockerConfig {
     pub port_range_end: u16,
     #[serde(default = "default_network")]
     pub network: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EcsConfig {
+    #[serde(default)]
+    pub cluster: String,
+    #[serde(default)]
+    pub task_definition: String,
+    #[serde(default)]
+    pub subnets: Vec<String>,
+    #[serde(default)]
+    pub security_groups: Vec<String>,
+    #[serde(default = "default_assign_public_ip")]
+    pub assign_public_ip: bool,
+    #[serde(default = "default_container_port")]
+    pub container_port: u16,
+    #[serde(default = "default_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub platform_version: Option<String>,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub log_group: Option<String>,
+    #[serde(default)]
+    pub log_stream_prefix: Option<String>,
+}
+
+impl Default for EcsConfig {
+    fn default() -> Self {
+        Self {
+            cluster: String::new(),
+            task_definition: String::new(),
+            subnets: vec![],
+            security_groups: vec![],
+            assign_public_ip: default_assign_public_ip(),
+            container_port: default_container_port(),
+            startup_timeout_secs: default_startup_timeout_secs(),
+            poll_interval_ms: default_poll_interval_ms(),
+            region: None,
+            platform_version: None,
+            container_name: None,
+            log_group: None,
+            log_stream_prefix: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -75,6 +143,9 @@ impl Default for SessionConfig {
 fn default_image() -> String {
     "anycode-sandbox:latest".to_string()
 }
+fn default_sandbox_provider() -> String {
+    "docker".to_string()
+}
 fn default_port_start() -> u16 {
     12000
 }
@@ -99,6 +170,18 @@ fn default_timeout_minutes() -> u64 {
 fn default_debounce_ms() -> u64 {
     500
 }
+fn default_assign_public_ip() -> bool {
+    true
+}
+fn default_container_port() -> u16 {
+    2468
+}
+fn default_startup_timeout_secs() -> u64 {
+    120
+}
+fn default_poll_interval_ms() -> u64 {
+    1000
+}
 
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
@@ -116,10 +199,42 @@ impl AppConfig {
                 "telegram.bot_token is required".into(),
             ));
         }
-        if self.docker.port_range_start >= self.docker.port_range_end {
-            return Err(AnycodeError::Config(
-                "docker.port_range_start must be less than port_range_end".into(),
-            ));
+        match self.sandbox.provider.as_str() {
+            "docker" => {
+                if self.docker.port_range_start >= self.docker.port_range_end {
+                    return Err(AnycodeError::Config(
+                        "docker.port_range_start must be less than port_range_end".into(),
+                    ));
+                }
+            }
+            "ecs" => {
+                if self.ecs.cluster.trim().is_empty() {
+                    return Err(AnycodeError::Config(
+                        "ecs.cluster is required when sandbox.provider = \"ecs\"".into(),
+                    ));
+                }
+                if self.ecs.task_definition.trim().is_empty() {
+                    return Err(AnycodeError::Config(
+                        "ecs.task_definition is required when sandbox.provider = \"ecs\"".into(),
+                    ));
+                }
+                if self.ecs.subnets.is_empty() {
+                    return Err(AnycodeError::Config(
+                        "ecs.subnets must include at least one subnet when sandbox.provider = \"ecs\""
+                            .into(),
+                    ));
+                }
+                if self.ecs.container_port == 0 {
+                    return Err(AnycodeError::Config(
+                        "ecs.container_port must be greater than 0".into(),
+                    ));
+                }
+            }
+            other => {
+                return Err(AnycodeError::Config(format!(
+                    "unsupported sandbox.provider \"{other}\" (expected \"docker\" or \"ecs\")"
+                )));
+            }
         }
         Ok(())
     }
@@ -197,5 +312,74 @@ bot_token = ""
 
         let err = AppConfig::load(&path).unwrap_err();
         assert!(err.to_string().contains("bot_token"));
+    }
+
+    #[test]
+    fn test_load_ecs_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            r#"
+[telegram]
+bot_token = "123:ABC"
+
+[sandbox]
+provider = "ecs"
+
+[ecs]
+cluster = "anycode-cluster"
+task_definition = "anycode-task:1"
+subnets = ["subnet-123"]
+container_port = 2468
+
+[docker]
+
+[database]
+path = "test.db"
+
+[agents]
+default_agent = "claude-code"
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.sandbox.provider, "ecs");
+        assert_eq!(config.ecs.cluster, "anycode-cluster");
+    }
+
+    #[test]
+    fn test_ecs_provider_requires_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            r#"
+[telegram]
+bot_token = "123:ABC"
+
+[sandbox]
+provider = "ecs"
+
+[ecs]
+task_definition = "anycode-task:1"
+subnets = ["subnet-123"]
+
+[docker]
+
+[database]
+path = "test.db"
+
+[agents]
+default_agent = "claude-code"
+"#
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(err.to_string().contains("ecs.cluster"));
     }
 }
