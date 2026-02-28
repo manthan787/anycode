@@ -2,7 +2,7 @@
 
 ## What is Anycode?
 
-A Rust daemon that bridges Telegram messaging with containerized coding agents (Claude Code, Codex, Goose). Users dispatch `/task` commands from Telegram; Anycode spins up a Docker sandbox running the agent, streams output back, handles bidirectional Q&A via inline buttons, and tears down containers when done.
+A Rust daemon that bridges Telegram messaging with isolated coding agent sandboxes (Claude Code, Codex, Goose). Users dispatch `/task` commands from Telegram; Anycode spins up a sandbox (Docker locally or ECS Fargate in cloud) running the agent, streams output back, handles bidirectional Q&A via inline buttons, and tears down the sandbox when done.
 
 ---
 
@@ -17,7 +17,9 @@ anycode-core/
 │   └── repo.rs        Async SQLite repository (tokio-rusqlite)
 ├── infra/
 │   ├── traits.rs      SandboxProvider trait
-│   └── docker.rs      Docker implementation (bollard)
+│   ├── docker.rs      Docker implementation (bollard)
+│   ├── ecs.rs         ECS Fargate implementation (aws-sdk)
+│   └── provider.rs    Runtime provider enum (Docker/ECS)
 ├── messaging/
 │   ├── traits.rs      MessagingProvider trait + event types
 │   └── telegram.rs    Teloxide-based Telegram bot
@@ -58,7 +60,7 @@ pub trait SandboxProvider: Send + Sync + 'static {
     async fn get_logs(&self, sandbox_id: &str, tail: usize) -> Result<String>;
 }
 ```
-Currently implemented: Docker (bollard). Extensible to Kubernetes, EC2, E2B, etc.
+Currently implemented: Docker (bollard) and ECS Fargate (aws-sdk). Extensible to Kubernetes, EC2, E2B, etc.
 
 ---
 
@@ -88,15 +90,15 @@ Pending → Starting → Running → Completed / Failed / Cancelled
 ```
 
 1. `/task` received → create Session (Pending)
-2. DockerProvider.create_sandbox() → container starts (Starting)
+2. SandboxProvider.create_sandbox() → container/task starts (Starting)
 3. SandboxClient.wait_for_ready() → poll /v1/health (60s timeout)
 4. SandboxClient.create_session() + send_message() → agent working (Running)
 5. SSE events stream back: deltas → Telegram edits, questions → inline buttons
-6. session.ended or error → cleanup container, update DB (Completed/Failed)
+6. session.ended or error → cleanup sandbox, update DB (Completed/Failed)
 
-**Cancellation**: `/cancel` → remove from DashMap, destroy container, mark Cancelled.
+**Cancellation**: `/cancel` → remove from DashMap, destroy sandbox, mark Cancelled.
 
-**Recovery on startup**: Query DB for non-terminal sessions. Check container alive. Dead → mark Failed.
+**Recovery on startup**: Query DB for non-terminal sessions. Check sandbox alive. Dead → mark Failed.
 
 ---
 
@@ -179,9 +181,10 @@ pub enum AnycodeError {
 
 ## Configuration Philosophy
 
-**Minimal required config**: Just `telegram.bot_token`.
+**Minimal required config**: Just `telegram.bot_token` (with default `sandbox.provider = "docker"`).
 
 Everything else has sensible defaults:
+- Sandbox provider: `docker`
 - Docker image: `anycode-sandbox:latest`
 - Port range: 12000-12100
 - Database: `anycode.db`
@@ -191,6 +194,11 @@ Everything else has sensible defaults:
 - Debounce: 500ms
 
 Agent credentials passed per-agent via `[agents.credentials.<name>]` sections → injected as container env vars at creation time (never baked into image).
+
+When `sandbox.provider = "ecs"`, these are additionally required:
+- `ecs.cluster`
+- `ecs.task_definition`
+- `ecs.subnets` (at least one)
 
 ---
 
@@ -212,7 +220,8 @@ On button press: look up PendingInteraction by ID, forward answer to sandbox age
 | Issue | Status | Notes |
 |---|---|---|
 | **Bollard deprecated APIs** | `#[allow(deprecated)]` | bollard 0.19 deprecated old container API in favor of builders. Deprecated API still works fine. Monitor for bollard 0.20+ migration. |
-| **Port allocator is naive** | Works for now | Simple atomic counter. Doesn't track freed ports. Generous range mitigates. |
+| **ECS startup latency variance** | Works for now | Fargate cold-start time depends on region/image pull. Tuned with `startup_timeout_secs` and `poll_interval_ms`. |
+| **Port allocator is naive (Docker)** | Works for now | Simple atomic counter with wraparound. Doesn't track freed ports or in-use collisions. |
 | **Session recovery is partial** | Marks dead sessions as Failed | Full reattachment (reconnect SSE to existing container) not implemented. Container alive → still lost. |
 | **Telegram Markdown escaping** | Fallback to plain text | MarkdownV2 has strict escape rules. If edit fails, retry without formatting. |
 | **DashMap iteration + removal** | Collect keys first | Can't remove during DashMap iteration; collect into Vec, iterate separately. |
@@ -225,7 +234,7 @@ On button press: look up PendingInteraction by ID, forward answer to sandbox age
 - **Unit tests co-located** with source (`#[cfg(test)]` blocks)
 - **In-memory SQLite** for DB tests (fast, isolated)
 - **tempfile** for config tests
-- **12 tests total**: config (2), DB CRUD (4), message splitting (2), URL extraction (2), delta buffer (2)
+- **33 tests total**: config (4), DB CRUD (7), bridge behavior (12), infra helpers (6), message/URL/delta utilities (4)
 - **No integration tests** — would require Docker daemon + Telegram bot token
 - **All async** via `#[tokio::test]`
 
@@ -238,6 +247,7 @@ On button press: look up PendingInteraction by ID, forward answer to sandbox age
 | tokio (full) | Async runtime, timers, signals, sync primitives |
 | teloxide | Telegram bot framework with update handler DSL |
 | bollard | Low-level Docker API client (more control than docker-rs) |
+| aws-config / aws-sdk-ecs / aws-sdk-ec2 / aws-sdk-cloudwatchlogs | ECS Fargate lifecycle, ENI lookup, and CloudWatch logs |
 | reqwest + reqwest-eventsource | HTTP client with native SSE support |
 | tokio-rusqlite / rusqlite (bundled) | Async SQLite without server overhead |
 | dashmap | Lock-free concurrent hashmap (better than RwLock for read-heavy) |
@@ -254,6 +264,6 @@ On button press: look up PendingInteraction by ID, forward answer to sandbox age
 2. **Explicit ownership** — Arc clones are deliberate; no hidden global state
 3. **Fail fast on config, recover on runtime** — validation at startup, lenient during operation
 4. **Non-blocking everything** — tokio spawns for parallelism, async mutex only where necessary
-5. **Operational simplicity** — single binary, file-based DB, no external services besides Docker
+5. **Operational simplicity** — single binary, file-based DB, optional external infra (Docker or ECS)
 6. **Graceful degradation** — SSE reconnects, markdown fallback, orphan cleanup
 7. **Audit trail** — event_log captures full session history for debugging

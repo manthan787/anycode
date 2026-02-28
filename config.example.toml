@@ -13,11 +13,31 @@ allowed_users = []
 # bot_token = "xoxb-..."   # Bot token with chat:write, files:write scopes
 # allowed_users = []        # Slack user IDs, e.g. ["U01ABC123"]
 
+[sandbox]
+# "docker" (local) or "ecs" (AWS Fargate)
+provider = "docker"
+
 [docker]
 image = "anycode-sandbox:latest"
 port_range_start = 12000
 port_range_end = 12100
 network = "bridge"
+
+[ecs]
+# Required when sandbox.provider = "ecs"
+# cluster = "anycode-cluster"
+# task_definition = "anycode-sandbox:1"
+# subnets = ["subnet-abc123", "subnet-def456"]
+# security_groups = ["sg-abc123"]
+# assign_public_ip = true
+# container_port = 2468
+# startup_timeout_secs = 120
+# poll_interval_ms = 1000
+# region = "us-west-2"
+# platform_version = "LATEST"
+# container_name = "anycode-sandbox"
+# log_group = "/ecs/anycode"
+# log_stream_prefix = "anycode"
 
 [database]
 path = "anycode.db"

@@ -1061,7 +1061,8 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::config::{
-        AgentsConfig, AppConfig, DatabaseConfig, DockerConfig, SessionConfig, TelegramConfig,
+        AgentsConfig, AppConfig, DatabaseConfig, DockerConfig, EcsConfig, SandboxRuntimeConfig,
+        SessionConfig, TelegramConfig,
     };
     use crate::infra::{SandboxConfig, SandboxHandle, SandboxProvider};
     use crate::messaging::traits::MessagingProvider;
@@ -1130,12 +1131,14 @@ mod tests {
                 allowed_users: vec![],
             }),
             slack: None,
+            sandbox: SandboxRuntimeConfig::default(),
             docker: DockerConfig {
                 image: "anycode-sandbox:latest".to_string(),
                 port_range_start: 12000,
                 port_range_end: 12100,
                 network: "bridge".to_string(),
             },
+            ecs: EcsConfig::default(),
             database: DatabaseConfig {
                 path: ":memory:".to_string(),
             },
@@ -1166,12 +1169,14 @@ mod tests {
                 allowed_users: vec![],
             }),
             slack: None,
+            sandbox: SandboxRuntimeConfig::default(),
             docker: DockerConfig {
                 image: "anycode-sandbox:latest".to_string(),
                 port_range_start: 12000,
                 port_range_end: 12100,
                 network: "bridge".to_string(),
             },
+            ecs: EcsConfig::default(),
             database: DatabaseConfig {
                 path: ":memory:".to_string(),
             },
