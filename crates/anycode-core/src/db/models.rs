@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
-    pub chat_id: i64,
+    pub chat_id: String,
     pub agent: String,
     pub prompt: String,
     pub repo_url: Option<String>,
@@ -62,7 +62,7 @@ pub struct PendingInteraction {
     pub kind: InteractionKind,
     pub question_id: Option<String>,
     pub permission_id: Option<String>,
-    pub telegram_message_id: Option<i64>,
+    pub platform_message_id: Option<String>,
     pub payload: Option<String>,
     pub resolved: bool,
     pub created_at: String,

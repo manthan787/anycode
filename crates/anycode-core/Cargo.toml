@@ -7,7 +7,7 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 teloxide = { version = "0.17", features = ["macros"] }
 bollard = "0.19"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 reqwest-eventsource = "0.6"
 tokio-rusqlite = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -23,6 +23,7 @@ dashmap = "6"
 async-trait = "0.1"
 futures = "0.3"
 regex-lite = "0.1"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

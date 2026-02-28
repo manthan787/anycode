@@ -6,10 +6,10 @@ use crate::error::Result;
 /// An outbound message to send via messaging platform.
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
-    pub chat_id: i64,
+    pub chat_id: String,
     pub text: String,
     /// If set, edit this existing message instead of sending a new one.
-    pub edit_message_id: Option<i64>,
+    pub edit_message_id: Option<String>,
     /// Inline keyboard buttons: Vec of rows, each row is Vec of (label, callback_data).
     pub buttons: Vec<Vec<(String, String)>>,
 }
@@ -18,21 +18,21 @@ pub struct OutboundMessage {
 #[derive(Debug, Clone)]
 pub enum InboundEvent {
     Command {
-        chat_id: i64,
-        user_id: i64,
+        chat_id: String,
+        user_id: String,
         command: String,
         args: String,
     },
     Message {
-        chat_id: i64,
-        user_id: i64,
+        chat_id: String,
+        user_id: String,
         text: String,
     },
     CallbackQuery {
         query_id: String,
-        chat_id: i64,
-        user_id: i64,
-        message_id: i64,
+        chat_id: String,
+        user_id: String,
+        message_id: String,
         data: String,
     },
 }
@@ -40,7 +40,7 @@ pub enum InboundEvent {
 #[async_trait]
 pub trait MessagingProvider: Send + Sync + 'static {
     /// Send a message (or edit an existing one). Returns the message ID.
-    async fn send_message(&self, msg: OutboundMessage) -> Result<i64>;
+    async fn send_message(&self, msg: OutboundMessage) -> Result<String>;
 
     /// Acknowledge a callback query (button press).
     async fn answer_callback(&self, query_id: &str, text: &str) -> Result<()>;
@@ -49,5 +49,5 @@ pub trait MessagingProvider: Send + Sync + 'static {
     async fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<InboundEvent>>;
 
     /// Upload a file to a chat.
-    async fn send_file(&self, chat_id: i64, filename: &str, data: Vec<u8>) -> Result<()>;
+    async fn send_file(&self, chat_id: &str, filename: &str, data: Vec<u8>) -> Result<()>;
 }

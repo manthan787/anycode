@@ -5,7 +5,8 @@ use crate::error::{AnycodeError, Result};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
-    pub telegram: TelegramConfig,
+    pub telegram: Option<TelegramConfig>,
+    pub slack: Option<SlackConfig>,
     pub docker: DockerConfig,
     pub database: DatabaseConfig,
     pub agents: AgentsConfig,
@@ -17,7 +18,15 @@ pub struct AppConfig {
 pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
-    pub allowed_users: Vec<i64>,
+    pub allowed_users: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlackConfig {
+    pub app_token: String,
+    pub bot_token: String,
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,10 +120,29 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.telegram.bot_token.is_empty() {
+        if self.telegram.is_none() && self.slack.is_none() {
             return Err(AnycodeError::Config(
-                "telegram.bot_token is required".into(),
+                "at least one messaging platform must be configured (telegram or slack)".into(),
             ));
+        }
+        if let Some(ref tg) = self.telegram {
+            if tg.bot_token.is_empty() {
+                return Err(AnycodeError::Config(
+                    "telegram.bot_token is required".into(),
+                ));
+            }
+        }
+        if let Some(ref slack) = self.slack {
+            if slack.app_token.is_empty() {
+                return Err(AnycodeError::Config(
+                    "slack.app_token is required".into(),
+                ));
+            }
+            if slack.bot_token.is_empty() {
+                return Err(AnycodeError::Config(
+                    "slack.bot_token is required".into(),
+                ));
+            }
         }
         if self.docker.port_range_start >= self.docker.port_range_end {
             return Err(AnycodeError::Config(
@@ -170,7 +198,7 @@ env = {{ ANTHROPIC_API_KEY = "sk-test" }}
         .unwrap();
 
         let config = AppConfig::load(&path).unwrap();
-        assert_eq!(config.telegram.bot_token, "123:ABC");
+        assert_eq!(config.telegram.as_ref().unwrap().bot_token, "123:ABC");
         assert_eq!(config.docker.port_range_start, 12000);
         assert_eq!(config.agents.default_agent, "claude-code");
     }
@@ -197,5 +225,56 @@ bot_token = ""
 
         let err = AppConfig::load(&path).unwrap_err();
         assert!(err.to_string().contains("bot_token"));
+    }
+
+    #[test]
+    fn test_no_platform_configured_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            r#"
+[docker]
+
+[database]
+
+[agents]
+"#
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(err.to_string().contains("at least one messaging platform"));
+    }
+
+    #[test]
+    fn test_slack_config_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            r#"
+[slack]
+app_token = "xapp-test"
+bot_token = "xoxb-test"
+allowed_users = ["U123"]
+
+[docker]
+
+[database]
+
+[agents]
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert!(config.telegram.is_none());
+        let slack = config.slack.as_ref().unwrap();
+        assert_eq!(slack.app_token, "xapp-test");
+        assert_eq!(slack.bot_token, "xoxb-test");
+        assert_eq!(slack.allowed_users, vec!["U123".to_string()]);
     }
 }

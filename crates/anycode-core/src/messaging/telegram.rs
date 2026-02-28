@@ -23,26 +23,34 @@ impl TelegramProvider {
 
 #[async_trait]
 impl MessagingProvider for TelegramProvider {
-    async fn send_message(&self, msg: OutboundMessage) -> Result<i64> {
-        let chat_id = ChatId(msg.chat_id);
+    async fn send_message(&self, msg: OutboundMessage) -> Result<String> {
+        let chat_id_num: i64 = msg
+            .chat_id
+            .parse()
+            .map_err(|_| AnycodeError::Messaging(format!("invalid chat_id: {}", msg.chat_id)))?;
+        let chat_id = ChatId(chat_id_num);
 
-        if let Some(edit_id) = msg.edit_message_id {
+        if let Some(ref edit_id_str) = msg.edit_message_id {
+            let edit_id: i32 = edit_id_str
+                .parse()
+                .map_err(|_| AnycodeError::Messaging(format!("invalid edit_message_id: {edit_id_str}")))?;
+
             let result = self
                 .bot
-                .edit_message_text(chat_id, MessageId(edit_id as i32), &msg.text)
+                .edit_message_text(chat_id, MessageId(edit_id), &msg.text)
                 .parse_mode(ParseMode::MarkdownV2)
                 .await;
 
             match result {
-                Ok(m) => Ok(m.id.0 as i64),
+                Ok(m) => Ok(m.id.0.to_string()),
                 Err(e) => {
                     warn!("Markdown edit failed, retrying plain: {e}");
                     let m = self
                         .bot
-                        .edit_message_text(chat_id, MessageId(edit_id as i32), &msg.text)
+                        .edit_message_text(chat_id, MessageId(edit_id), &msg.text)
                         .await
                         .map_err(|e| AnycodeError::Messaging(e.to_string()))?;
-                    Ok(m.id.0 as i64)
+                    Ok(m.id.0.to_string())
                 }
             }
         } else {
@@ -65,7 +73,7 @@ impl MessagingProvider for TelegramProvider {
             match result {
                 Ok(m) => {
                     debug!("Sent message {} to chat {}", m.id.0, msg.chat_id);
-                    Ok(m.id.0 as i64)
+                    Ok(m.id.0.to_string())
                 }
                 Err(e) => Err(AnycodeError::Messaging(e.to_string())),
             }
@@ -95,9 +103,12 @@ impl MessagingProvider for TelegramProvider {
                         move |msg: Message| {
                             let tx = tx.clone();
                             async move {
-                                let chat_id = msg.chat.id.0;
-                                let user_id =
-                                    msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
+                                let chat_id = msg.chat.id.0.to_string();
+                                let user_id = msg
+                                    .from
+                                    .as_ref()
+                                    .map(|u| u.id.0.to_string())
+                                    .unwrap_or_else(|| "0".to_string());
                                 let text = msg.text().unwrap_or("").to_string();
 
                                 if let Some(stripped) = text.strip_prefix('/') {
@@ -137,16 +148,16 @@ impl MessagingProvider for TelegramProvider {
                                 let data = q.data.unwrap_or_default();
                                 let (chat_id, message_id) = match q.message {
                                     Some(ref m) => {
-                                        let cid = m.chat().id.0;
+                                        let cid = m.chat().id.0.to_string();
                                         let mid = m
                                             .regular_message()
-                                            .map(|rm| rm.id.0 as i64)
-                                            .unwrap_or(0);
+                                            .map(|rm| rm.id.0.to_string())
+                                            .unwrap_or_else(|| "0".to_string());
                                         (cid, mid)
                                     }
-                                    None => (0, 0),
+                                    None => ("0".to_string(), "0".to_string()),
                                 };
-                                let user_id = q.from.id.0 as i64;
+                                let user_id = q.from.id.0.to_string();
                                 let _ = tx.send(InboundEvent::CallbackQuery {
                                     query_id,
                                     chat_id,
@@ -172,10 +183,13 @@ impl MessagingProvider for TelegramProvider {
         Ok(rx)
     }
 
-    async fn send_file(&self, chat_id: i64, filename: &str, data: Vec<u8>) -> Result<()> {
+    async fn send_file(&self, chat_id: &str, filename: &str, data: Vec<u8>) -> Result<()> {
+        let chat_id_num: i64 = chat_id
+            .parse()
+            .map_err(|_| AnycodeError::Messaging(format!("invalid chat_id: {chat_id}")))?;
         let file = InputFile::memory(data).file_name(filename.to_string());
         self.bot
-            .send_document(ChatId(chat_id), file)
+            .send_document(ChatId(chat_id_num), file)
             .await
             .map_err(|e| AnycodeError::Messaging(e.to_string()))?;
         Ok(())

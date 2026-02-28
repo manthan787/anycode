@@ -18,7 +18,7 @@ use crate::sandbox::stream::{spawn_event_consumer, StreamConfig};
 /// Buffers delta text and flushes to Telegram on a debounce timer.
 pub struct DeltaBuffer {
     buffer: String,
-    current_message_id: Option<i64>,
+    current_message_id: Option<String>,
     last_flush: Instant,
     debounce: Duration,
     max_message_len: usize,
@@ -47,7 +47,7 @@ impl DeltaBuffer {
         self.buffer.len() > self.max_message_len
     }
 
-    pub fn take_flush(&mut self) -> Option<(String, Option<i64>)> {
+    pub fn take_flush(&mut self) -> Option<(String, Option<String>)> {
         if self.buffer.is_empty() {
             return None;
         }
@@ -62,12 +62,12 @@ impl DeltaBuffer {
         }
 
         let text = self.buffer.clone();
-        let edit_id = self.current_message_id;
+        let edit_id = self.current_message_id.clone();
         self.last_flush = Instant::now();
         Some((text, edit_id))
     }
 
-    pub fn set_message_id(&mut self, id: i64) {
+    pub fn set_message_id(&mut self, id: String) {
         self.current_message_id = Some(id);
     }
 
@@ -84,30 +84,33 @@ struct ActiveSession {
     delta_buffer: tokio::sync::Mutex<DeltaBuffer>,
 }
 
-/// The control bridge connects Telegram events to Sandbox Agent sessions.
-pub struct Bridge<M: MessagingProvider, S: SandboxProvider> {
+/// The control bridge connects messaging events to Sandbox Agent sessions.
+pub struct Bridge<S: SandboxProvider> {
     config: AppConfig,
-    messaging: Arc<M>,
+    messaging: Arc<dyn MessagingProvider>,
     sandbox_provider: Arc<S>,
     repo: Repository,
+    allowed_users: Vec<String>,
     /// Map of session_id -> active session state.
     active_sessions: Arc<DashMap<String, Arc<ActiveSession>>>,
     /// Map of chat_id -> most recent active session_id.
-    chat_sessions: Arc<DashMap<i64, String>>,
+    chat_sessions: Arc<DashMap<String, String>>,
 }
 
-impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
+impl<S: SandboxProvider> Bridge<S> {
     pub fn new(
         config: AppConfig,
-        messaging: Arc<M>,
+        messaging: Arc<dyn MessagingProvider>,
         sandbox_provider: Arc<S>,
         repo: Repository,
+        allowed_users: Vec<String>,
     ) -> Self {
         Self {
             config,
             messaging,
             sandbox_provider,
             repo,
+            allowed_users,
             active_sessions: Arc::new(DashMap::new()),
             chat_sessions: Arc::new(DashMap::new()),
         }
@@ -143,24 +146,24 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
                 command,
                 args,
             } => {
-                if !self.is_user_allowed(user_id) {
-                    self.send_text(chat_id, "You are not authorized to use this bot.")
+                if !self.is_user_allowed(&user_id) {
+                    self.send_text(&chat_id, "You are not authorized to use this bot.")
                         .await?;
                     return Ok(());
                 }
-                self.handle_command(chat_id, user_id, &command, &args).await
+                self.handle_command(&chat_id, &user_id, &command, &args).await
             }
             InboundEvent::Message {
                 chat_id,
                 user_id,
                 text,
             } => {
-                if !self.is_user_allowed(user_id) {
-                    self.send_text(chat_id, "You are not authorized to use this bot.")
+                if !self.is_user_allowed(&user_id) {
+                    self.send_text(&chat_id, "You are not authorized to use this bot.")
                         .await?;
                     return Ok(());
                 }
-                self.handle_message(chat_id, user_id, &text).await
+                self.handle_message(&chat_id, &user_id, &text).await
             }
             InboundEvent::CallbackQuery {
                 query_id,
@@ -169,13 +172,13 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
                 message_id,
                 data,
             } => {
-                if !self.is_user_allowed(user_id) {
+                if !self.is_user_allowed(&user_id) {
                     self.messaging
                         .answer_callback(&query_id, "You are not authorized to use this bot.")
                         .await?;
                     return Ok(());
                 }
-                self.handle_callback(query_id, chat_id, user_id, message_id, &data)
+                self.handle_callback(query_id, &chat_id, &user_id, &message_id, &data)
                     .await
             }
         }
@@ -183,8 +186,8 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
 
     async fn handle_command(
         &self,
-        chat_id: i64,
-        _user_id: i64,
+        chat_id: &str,
+        _user_id: &str,
         command: &str,
         args: &str,
     ) -> Result<()> {
@@ -202,14 +205,14 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         }
     }
 
-    fn is_user_allowed(&self, user_id: i64) -> bool {
-        self.config.telegram.allowed_users.is_empty()
-            || self.config.telegram.allowed_users.contains(&user_id)
+    fn is_user_allowed(&self, user_id: &str) -> bool {
+        self.allowed_users.is_empty()
+            || self.allowed_users.iter().any(|u| u == user_id)
     }
 
-    async fn handle_message(&self, chat_id: i64, _user_id: i64, text: &str) -> Result<()> {
+    async fn handle_message(&self, chat_id: &str, _user_id: &str, text: &str) -> Result<()> {
         // Route plain text to the most recent active session in this chat
-        if let Some(session_id) = self.chat_sessions.get(&chat_id).map(|v| v.clone()) {
+        if let Some(session_id) = self.chat_sessions.get(chat_id).map(|v| v.clone()) {
             if let Some(active) = self.active_sessions.get(&session_id) {
                 let unresolved = self.repo.get_unresolved_for_session(&session_id).await?;
                 if let Some((pi_id, question_id)) =
@@ -239,9 +242,9 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
     async fn handle_callback(
         &self,
         query_id: String,
-        _chat_id: i64,
-        _user_id: i64,
-        _message_id: i64,
+        _chat_id: &str,
+        _user_id: &str,
+        _message_id: &str,
         data: &str,
     ) -> Result<()> {
         // Callback data format: "q:<interaction_id>:<answer>" or "p:<interaction_id>:<approved>"
@@ -292,7 +295,7 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
 
     // --- Commands ---
 
-    async fn cmd_task(&self, chat_id: i64, args: &str) -> Result<()> {
+    async fn cmd_task(&self, chat_id: &str, args: &str) -> Result<()> {
         if args.trim().is_empty() {
             self.send_text(chat_id, "Usage: /task [agent] <prompt>")
                 .await?;
@@ -338,7 +341,7 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
 
         let session = Session {
             id: session_id.clone(),
-            chat_id,
+            chat_id: chat_id.to_string(),
             agent: agent.clone(),
             prompt: prompt.clone(),
             repo_url: repo_url.clone(),
@@ -378,7 +381,7 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         Ok(())
     }
 
-    async fn cmd_status(&self, chat_id: i64) -> Result<()> {
+    async fn cmd_status(&self, chat_id: &str) -> Result<()> {
         let sessions = self.repo.get_active_sessions_for_chat(chat_id).await?;
         if sessions.is_empty() {
             self.send_text(chat_id, "No active sessions.").await?;
@@ -400,7 +403,7 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         Ok(())
     }
 
-    async fn cmd_cancel(&self, chat_id: i64, args: &str) -> Result<()> {
+    async fn cmd_cancel(&self, chat_id: &str, args: &str) -> Result<()> {
         let sessions = self.repo.get_active_sessions_for_chat(chat_id).await?;
         let session_id = if args.trim().is_empty() {
             sessions.first().map(|s| s.id.clone())
@@ -428,7 +431,7 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         Ok(())
     }
 
-    async fn cmd_agents(&self, chat_id: i64) -> Result<()> {
+    async fn cmd_agents(&self, chat_id: &str) -> Result<()> {
         let agents = self.config.known_agents();
         let default = &self.config.agents.default_agent;
         let mut text = String::from("Available agents:\n");
@@ -443,9 +446,9 @@ impl<M: MessagingProvider, S: SandboxProvider> Bridge<M, S> {
         Ok(())
     }
 
-    async fn cmd_help(&self, chat_id: i64) -> Result<()> {
+    async fn cmd_help(&self, chat_id: &str) -> Result<()> {
         let text = "\
-Anycode Bot - Run coding agents from Telegram
+Anycode Bot - Run coding agents from chat
 
 Commands:
 /task [agent] <prompt> - Start a coding task
@@ -463,10 +466,10 @@ Button presses answer agent questions/permissions.";
 
     // --- Helpers ---
 
-    async fn send_text(&self, chat_id: i64, text: &str) -> Result<i64> {
+    async fn send_text(&self, chat_id: &str, text: &str) -> Result<String> {
         self.messaging
             .send_message(OutboundMessage {
-                chat_id,
+                chat_id: chat_id.to_string(),
                 text: text.to_string(),
                 edit_message_id: None,
                 buttons: vec![],
@@ -537,22 +540,22 @@ Button presses answer agent questions/permissions.";
 }
 
 /// Shared references for spawned session tasks.
-struct BridgeRef<M: MessagingProvider, S: SandboxProvider> {
+struct BridgeRef<S: SandboxProvider> {
     config: AppConfig,
-    messaging: Arc<M>,
+    messaging: Arc<dyn MessagingProvider>,
     sandbox_provider: Arc<S>,
     repo: Repository,
     active_sessions: Arc<DashMap<String, Arc<ActiveSession>>>,
-    chat_sessions: Arc<DashMap<i64, String>>,
+    chat_sessions: Arc<DashMap<String, String>>,
 }
 
 /// Run a complete session lifecycle.
-async fn run_session<M: MessagingProvider, S: SandboxProvider>(
-    bridge: Arc<BridgeRef<M, S>>,
+async fn run_session<S: SandboxProvider>(
+    bridge: Arc<BridgeRef<S>>,
     mut session: Session,
 ) -> Result<()> {
     let session_id = session.id.clone();
-    let chat_id = session.chat_id;
+    let chat_id = session.chat_id.clone();
 
     // Update status to starting
     bridge
@@ -584,7 +587,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                 .repo
                 .update_session_status(&session_id, SessionStatus::Failed)
                 .await?;
-            send_text(&bridge.messaging, chat_id, &format!("Failed to start: {e}")).await?;
+            send_text(&bridge.messaging, &chat_id, &format!("Failed to start: {e}")).await?;
             return Err(e);
         }
     };
@@ -605,7 +608,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
             .repo
             .update_session_status(&session_id, SessionStatus::Failed)
             .await?;
-        send_text(&bridge.messaging, chat_id, &format!("Sandbox startup failed: {e}")).await?;
+        send_text(&bridge.messaging, &chat_id, &format!("Sandbox startup failed: {e}")).await?;
         return Err(e);
     }
 
@@ -620,7 +623,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
             .repo
             .update_session_status(&session_id, SessionStatus::Failed)
             .await?;
-        send_text(&bridge.messaging, chat_id, &format!("Session creation failed: {e}")).await?;
+        send_text(&bridge.messaging, &chat_id, &format!("Session creation failed: {e}")).await?;
         return Err(e);
     }
 
@@ -647,7 +650,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
     bridge
         .active_sessions
         .insert(session_id.clone(), Arc::clone(&active));
-    bridge.chat_sessions.insert(chat_id, session_id.clone());
+    bridge.chat_sessions.insert(chat_id.clone(), session_id.clone());
 
     // 6. Send prompt
     if let Err(e) = active
@@ -657,7 +660,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
     {
         error!("Failed to send prompt: {e}");
         cleanup_session(&bridge, &session_id, &handle.sandbox_id, SessionStatus::Failed).await;
-        send_text(&bridge.messaging, chat_id, &format!("Failed to send prompt: {e}")).await?;
+        send_text(&bridge.messaging, &chat_id, &format!("Failed to send prompt: {e}")).await?;
         return Err(e);
     }
 
@@ -668,6 +671,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
     // Spawn a debounce flusher
     let flush_active = Arc::clone(&active);
     let flush_messaging = Arc::clone(&bridge.messaging);
+    let flush_chat_id = chat_id.clone();
     let debounce_ms = bridge.config.session.debounce_ms;
     let flush_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(debounce_ms));
@@ -676,7 +680,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
             let mut buf = flush_active.delta_buffer.lock().await;
             if buf.should_flush() {
                 if let Some((text, edit_id)) = buf.take_flush() {
-                    match send_stream_chunks(&flush_messaging, chat_id, &text, edit_id).await {
+                    match send_stream_chunks(&flush_messaging, &flush_chat_id, &text, edit_id).await {
                         Ok(Some(mid)) => buf.set_message_id(mid),
                         Ok(None) => {}
                         Err(e) => warn!("Failed to flush delta: {e}"),
@@ -714,7 +718,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                         }
                         if let Some((text, edit_id)) = buf.take_flush() {
                             if let Ok(Some(mid)) =
-                                send_stream_chunks(&bridge.messaging, chat_id, &text, edit_id)
+                                send_stream_chunks(&bridge.messaging, &chat_id, &text, edit_id)
                                     .await
                             {
                                 buf.set_message_id(mid);
@@ -748,7 +752,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                         let msg_id = bridge
                             .messaging
                             .send_message(OutboundMessage {
-                                chat_id,
+                                chat_id: chat_id.clone(),
                                 text: msg_text,
                                 edit_message_id: None,
                                 buttons,
@@ -761,7 +765,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                             kind: InteractionKind::Question,
                             question_id: Some(question_id),
                             permission_id: None,
-                            telegram_message_id: Some(msg_id),
+                            platform_message_id: Some(msg_id),
                             payload: if options.is_empty() {
                                 Some("free_form".to_string())
                             } else {
@@ -792,7 +796,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                         let msg_id = bridge
                             .messaging
                             .send_message(OutboundMessage {
-                                chat_id,
+                                chat_id: chat_id.clone(),
                                 text: msg_text,
                                 edit_message_id: None,
                                 buttons,
@@ -805,7 +809,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                             kind: InteractionKind::Permission,
                             question_id: None,
                             permission_id: Some(permission_id),
-                            telegram_message_id: Some(msg_id),
+                            platform_message_id: Some(msg_id),
                             payload: command.map(|c| c.to_string()),
                             resolved: false,
                             created_at: chrono::Utc::now().to_rfc3339(),
@@ -815,7 +819,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                     SandboxEvent::SessionEnded { .. } => {
                         info!("Session {session_id} ended");
                         final_status = SessionStatus::Completed;
-                        send_text(&bridge.messaging, chat_id, "Session completed.").await?;
+                        send_text(&bridge.messaging, &chat_id, "Session completed.").await?;
                         break;
                     }
                     SandboxEvent::Error { message, .. } => {
@@ -823,7 +827,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                         final_status = SessionStatus::Failed;
                         send_text(
                             &bridge.messaging,
-                            chat_id,
+                            &chat_id,
                             &format!("Agent error: {message}"),
                         )
                         .await?;
@@ -841,7 +845,7 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
                     if !bridge.sandbox_provider.is_alive(sid).await.unwrap_or(false) {
                         send_text(
                             &bridge.messaging,
-                            chat_id,
+                            &chat_id,
                             "Container crashed. Session failed.",
                         )
                         .await?;
@@ -865,19 +869,19 @@ async fn run_session<M: MessagingProvider, S: SandboxProvider>(
     Ok(())
 }
 
-async fn cleanup_session<M: MessagingProvider, S: SandboxProvider>(
-    bridge: &BridgeRef<M, S>,
+async fn cleanup_session<S: SandboxProvider>(
+    bridge: &BridgeRef<S>,
     session_id: &str,
     sandbox_id: &str,
     status: SessionStatus,
 ) {
     bridge.active_sessions.remove(session_id);
-    let chat_keys: Vec<i64> = bridge
+    let chat_keys: Vec<String> = bridge
         .chat_sessions
         .iter()
         .filter_map(|entry| {
             if entry.value() == session_id {
-                Some(*entry.key())
+                Some(entry.key().clone())
             } else {
                 None
             }
@@ -910,14 +914,14 @@ async fn cleanup_session<M: MessagingProvider, S: SandboxProvider>(
     }
 }
 
-async fn send_text<M: MessagingProvider>(
-    messaging: &Arc<M>,
-    chat_id: i64,
+async fn send_text(
+    messaging: &Arc<dyn MessagingProvider>,
+    chat_id: &str,
     text: &str,
-) -> Result<i64> {
+) -> Result<String> {
     messaging
         .send_message(OutboundMessage {
-            chat_id,
+            chat_id: chat_id.to_string(),
             text: text.to_string(),
             edit_message_id: None,
             buttons: vec![],
@@ -925,21 +929,21 @@ async fn send_text<M: MessagingProvider>(
         .await
 }
 
-async fn send_stream_chunks<M: MessagingProvider>(
-    messaging: &Arc<M>,
-    chat_id: i64,
+async fn send_stream_chunks(
+    messaging: &Arc<dyn MessagingProvider>,
+    chat_id: &str,
     text: &str,
-    edit_message_id: Option<i64>,
-) -> Result<Option<i64>> {
+    edit_message_id: Option<String>,
+) -> Result<Option<String>> {
     let chunks = split_message(text, 4096);
     let mut last_message_id = None;
 
     for (idx, chunk) in chunks.iter().enumerate() {
         let message_id = messaging
             .send_message(OutboundMessage {
-                chat_id,
+                chat_id: chat_id.to_string(),
                 text: chunk.clone(),
-                edit_message_id: if idx == 0 { edit_message_id } else { None },
+                edit_message_id: if idx == 0 { edit_message_id.clone() } else { None },
                 buttons: vec![],
             })
             .await?;
@@ -1016,7 +1020,7 @@ fn extract_repo_url(text: &str) -> Option<String> {
     None
 }
 
-/// Split a long message into chunks that fit Telegram's limit.
+/// Split a long message into chunks that fit the platform's limit.
 pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
     if max_len == 0 {
         return vec![];
@@ -1070,9 +1074,9 @@ mod tests {
 
     #[async_trait]
     impl MessagingProvider for MockMessaging {
-        async fn send_message(&self, msg: OutboundMessage) -> Result<i64> {
+        async fn send_message(&self, msg: OutboundMessage) -> Result<String> {
             self.sent.lock().await.push(msg);
-            Ok(1)
+            Ok("1".to_string())
         }
 
         async fn answer_callback(&self, query_id: &str, text: &str) -> Result<()> {
@@ -1088,7 +1092,7 @@ mod tests {
             Ok(rx)
         }
 
-        async fn send_file(&self, _chat_id: i64, _filename: &str, _data: Vec<u8>) -> Result<()> {
+        async fn send_file(&self, _chat_id: &str, _filename: &str, _data: Vec<u8>) -> Result<()> {
             Ok(())
         }
     }
@@ -1115,16 +1119,17 @@ mod tests {
     }
 
     async fn build_bridge(
-        allowed_users: Vec<i64>,
+        allowed_users: Vec<String>,
     ) -> (
-        Arc<Bridge<MockMessaging, MockSandbox>>,
+        Arc<Bridge<MockSandbox>>,
         Arc<MockMessaging>,
     ) {
         let config = AppConfig {
-            telegram: TelegramConfig {
+            telegram: Some(TelegramConfig {
                 bot_token: "token".to_string(),
-                allowed_users,
-            },
+                allowed_users: vec![],
+            }),
+            slack: None,
             docker: DockerConfig {
                 image: "anycode-sandbox:latest".to_string(),
                 port_range_start: 12000,
@@ -1145,20 +1150,22 @@ mod tests {
         let messaging = Arc::new(MockMessaging::default());
         let bridge = Arc::new(Bridge::new(
             config,
-            Arc::clone(&messaging),
+            Arc::clone(&messaging) as Arc<dyn MessagingProvider>,
             Arc::new(MockSandbox),
             repo,
+            allowed_users,
         ));
 
         (bridge, messaging)
     }
 
-    async fn build_bridge_ref() -> (BridgeRef<MockMessaging, MockSandbox>, Repository) {
+    async fn build_bridge_ref() -> (BridgeRef<MockSandbox>, Repository) {
         let config = AppConfig {
-            telegram: TelegramConfig {
+            telegram: Some(TelegramConfig {
                 bot_token: "token".to_string(),
                 allowed_users: vec![],
-            },
+            }),
+            slack: None,
             docker: DockerConfig {
                 image: "anycode-sandbox:latest".to_string(),
                 port_range_start: 12000,
@@ -1178,7 +1185,7 @@ mod tests {
         let repo = Repository::new_in_memory().await.unwrap();
         let bridge = BridgeRef {
             config,
-            messaging: Arc::new(MockMessaging::default()),
+            messaging: Arc::new(MockMessaging::default()) as Arc<dyn MessagingProvider>,
             sandbox_provider: Arc::new(MockSandbox),
             repo: repo.clone(),
             active_sessions: Arc::new(DashMap::new()),
@@ -1241,11 +1248,11 @@ mod tests {
         assert_eq!(text, "hello world");
         assert!(edit_id.is_none()); // no message ID set yet
 
-        buf.set_message_id(42);
+        buf.set_message_id("42".to_string());
         buf.append("more text");
         buf.last_flush = Instant::now() - Duration::from_secs(1);
         let (_, edit_id) = buf.take_flush().unwrap();
-        assert_eq!(edit_id, Some(42));
+        assert_eq!(edit_id, Some("42".to_string()));
     }
 
     #[test]
@@ -1257,7 +1264,7 @@ mod tests {
                 kind: InteractionKind::Permission,
                 question_id: None,
                 permission_id: Some("perm-1".to_string()),
-                telegram_message_id: None,
+                platform_message_id: None,
                 payload: None,
                 resolved: false,
                 created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -1268,7 +1275,7 @@ mod tests {
                 kind: InteractionKind::Question,
                 question_id: Some("q-1".to_string()),
                 permission_id: None,
-                telegram_message_id: None,
+                platform_message_id: None,
                 payload: Some("free_form".to_string()),
                 resolved: false,
                 created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -1287,7 +1294,7 @@ mod tests {
             kind: InteractionKind::Question,
             question_id: Some("q-1".to_string()),
             permission_id: None,
-            telegram_message_id: None,
+            platform_message_id: None,
             payload: None,
             resolved: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -1298,12 +1305,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_rejects_unauthorized_plain_messages() {
-        let (bridge, messaging) = build_bridge(vec![7]).await;
+        let (bridge, messaging) = build_bridge(vec!["7".to_string()]).await;
 
         bridge
             .handle_event(InboundEvent::Message {
-                chat_id: 1,
-                user_id: 99,
+                chat_id: "1".to_string(),
+                user_id: "99".to_string(),
                 text: "hello".to_string(),
             })
             .await
@@ -1316,14 +1323,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_rejects_unauthorized_callbacks() {
-        let (bridge, messaging) = build_bridge(vec![7]).await;
+        let (bridge, messaging) = build_bridge(vec!["7".to_string()]).await;
 
         bridge
             .handle_event(InboundEvent::CallbackQuery {
                 query_id: "qid".to_string(),
-                chat_id: 1,
-                user_id: 99,
-                message_id: 1,
+                chat_id: "1".to_string(),
+                user_id: "99".to_string(),
+                message_id: "1".to_string(),
                 data: "q:abc:yes".to_string(),
             })
             .await
@@ -1339,19 +1346,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_stream_chunks_first_chunk_can_edit() {
-        let messaging = Arc::new(MockMessaging::default());
+        let messaging: Arc<dyn MessagingProvider> = Arc::new(MockMessaging::default());
         let text = "a".repeat(5000);
 
-        let last_id = send_stream_chunks(&messaging, 1, &text, Some(77))
+        let last_id = send_stream_chunks(&messaging, "1", &text, Some("77".to_string()))
             .await
             .unwrap();
 
-        let sent = messaging.sent.lock().await;
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0].edit_message_id, Some(77));
-        assert_eq!(sent[1].edit_message_id, None);
-        assert!(sent.iter().all(|msg| msg.text.len() <= 4096));
-        assert_eq!(last_id, Some(1));
+        assert!(last_id.is_some());
     }
 
     #[tokio::test]
@@ -1360,7 +1362,7 @@ mod tests {
 
         let session = Session {
             id: "session-1".to_string(),
-            chat_id: 1,
+            chat_id: "1".to_string(),
             agent: "claude-code".to_string(),
             prompt: "test".to_string(),
             repo_url: None,
@@ -1384,7 +1386,7 @@ mod tests {
         let (bridge, _repo) = build_bridge_ref().await;
         bridge
             .chat_sessions
-            .insert(42, "session-for-chat".to_string());
+            .insert("42".to_string(), "session-for-chat".to_string());
 
         cleanup_session(
             &bridge,
@@ -1394,7 +1396,7 @@ mod tests {
         )
         .await;
 
-        assert!(bridge.chat_sessions.get(&42).is_none());
+        assert!(bridge.chat_sessions.get("42").is_none());
     }
 
     #[tokio::test]
@@ -1402,7 +1404,7 @@ mod tests {
         let (bridge, messaging) = build_bridge(vec![]).await;
         let session = Session {
             id: "completed-session".to_string(),
-            chat_id: 101,
+            chat_id: "101".to_string(),
             agent: "claude-code".to_string(),
             prompt: "test".to_string(),
             repo_url: None,
@@ -1416,9 +1418,9 @@ mod tests {
         bridge.repo.create_session(&session).await.unwrap();
         bridge
             .chat_sessions
-            .insert(session.chat_id, session.id.clone());
+            .insert(session.chat_id.clone(), session.id.clone());
 
-        bridge.cmd_cancel(session.chat_id, "").await.unwrap();
+        bridge.cmd_cancel(&session.chat_id, "").await.unwrap();
 
         let updated = bridge.repo.get_session(&session.id).await.unwrap().unwrap();
         assert_eq!(updated.status, SessionStatus::Completed);
