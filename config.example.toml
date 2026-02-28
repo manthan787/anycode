@@ -1,7 +1,17 @@
+# At least one messaging platform must be configured.
+
+# --- Telegram (optional) ---
 [telegram]
 bot_token = "YOUR_BOT_TOKEN_HERE"
 # Restrict access to specific Telegram user IDs (empty = allow all)
 allowed_users = []
+
+# --- Slack (optional) ---
+# Uses Socket Mode (WebSocket), no public URL required.
+# [slack]
+# app_token = "xapp-..."   # App-level token with connections:write scope
+# bot_token = "xoxb-..."   # Bot token with chat:write, files:write scopes
+# allowed_users = []        # Slack user IDs, e.g. ["U01ABC123"]
 
 [sandbox]
 # "docker" (local) or "ecs" (AWS Fargate)

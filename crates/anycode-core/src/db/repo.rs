@@ -5,6 +5,7 @@ use crate::error::Result;
 use super::models::*;
 
 const SCHEMA: &str = include_str!("../../../../migrations/001_initial.sql");
+const MIGRATION_002: &str = include_str!("../../../../migrations/002_string_ids.sql");
 
 #[derive(Clone)]
 pub struct Repository {
@@ -16,6 +17,7 @@ impl Repository {
         let conn = Connection::open(path).await?;
         conn.call(|conn| {
             conn.execute_batch(SCHEMA)?;
+            Self::run_migrations(conn)?;
             Ok(())
         })
         .await?;
@@ -26,10 +28,45 @@ impl Repository {
         let conn = Connection::open_in_memory().await?;
         conn.call(|conn| {
             conn.execute_batch(SCHEMA)?;
+            Self::run_migrations(conn)?;
             Ok(())
         })
         .await?;
         Ok(Self { conn })
+    }
+
+    fn run_migrations(conn: &rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _migrations (
+                id INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )?;
+
+        let applied: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM _migrations WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !applied {
+            // Only run if the old column exists (fresh DBs already have the new schema from 001)
+            let has_old_column: bool = conn
+                .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_interactions'")?
+                .query_row([], |row| row.get::<_, String>(0))
+                .map(|sql| sql.contains("telegram_message_id"))
+                .unwrap_or(false);
+
+            if has_old_column {
+                conn.execute_batch(MIGRATION_002)?;
+            }
+
+            conn.execute("INSERT OR IGNORE INTO _migrations (id) VALUES (2)", [])?;
+        }
+
+        Ok(())
     }
 
     // --- Sessions ---
@@ -73,7 +110,7 @@ impl Repository {
                     .query_row(rusqlite::params![id], |row| {
                         Ok(Session {
                             id: row.get(0)?,
-                            chat_id: row.get(1)?,
+                            chat_id: row.get::<_, String>(1)?,
                             agent: row.get(2)?,
                             prompt: row.get(3)?,
                             repo_url: row.get(4)?,
@@ -163,7 +200,8 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn get_active_sessions_for_chat(&self, chat_id: i64) -> Result<Vec<Session>> {
+    pub async fn get_active_sessions_for_chat(&self, chat_id: &str) -> Result<Vec<Session>> {
+        let chat_id = chat_id.to_string();
         self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -175,7 +213,7 @@ impl Repository {
                     .query_map(rusqlite::params![chat_id], |row| {
                         Ok(Session {
                             id: row.get(0)?,
-                            chat_id: row.get(1)?,
+                            chat_id: row.get::<_, String>(1)?,
                             agent: row.get(2)?,
                             prompt: row.get(3)?,
                             repo_url: row.get(4)?,
@@ -208,7 +246,7 @@ impl Repository {
                     .query_map([], |row| {
                         Ok(Session {
                             id: row.get(0)?,
-                            chat_id: row.get(1)?,
+                            chat_id: row.get::<_, String>(1)?,
                             agent: row.get(2)?,
                             prompt: row.get(3)?,
                             repo_url: row.get(4)?,
@@ -236,7 +274,7 @@ impl Repository {
         self.conn
             .call(move |conn| {
                 conn.execute(
-                    "INSERT INTO pending_interactions (id, session_id, kind, question_id, permission_id, telegram_message_id, payload, resolved, created_at)
+                    "INSERT INTO pending_interactions (id, session_id, kind, question_id, permission_id, platform_message_id, payload, resolved, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     rusqlite::params![
                         pi.id,
@@ -244,7 +282,7 @@ impl Repository {
                         pi.kind.as_str(),
                         pi.question_id,
                         pi.permission_id,
-                        pi.telegram_message_id,
+                        pi.platform_message_id,
                         pi.payload,
                         pi.resolved as i32,
                         pi.created_at,
@@ -261,7 +299,7 @@ impl Repository {
         self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, kind, question_id, permission_id, telegram_message_id, payload, resolved, created_at
+                    "SELECT id, session_id, kind, question_id, permission_id, platform_message_id, payload, resolved, created_at
                      FROM pending_interactions WHERE id = ?1",
                 )?;
                 let result = stmt
@@ -274,7 +312,7 @@ impl Repository {
                             ),
                             question_id: row.get(3)?,
                             permission_id: row.get(4)?,
-                            telegram_message_id: row.get(5)?,
+                            platform_message_id: row.get(5)?,
                             payload: row.get(6)?,
                             resolved: row.get::<_, i32>(7)? != 0,
                             created_at: row.get(8)?,
@@ -309,7 +347,7 @@ impl Repository {
         self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, kind, question_id, permission_id, telegram_message_id, payload, resolved, created_at
+                    "SELECT id, session_id, kind, question_id, permission_id, platform_message_id, payload, resolved, created_at
                      FROM pending_interactions WHERE session_id = ?1 AND resolved = 0
                      ORDER BY created_at ASC",
                 )?;
@@ -323,7 +361,7 @@ impl Repository {
                             ),
                             question_id: row.get(3)?,
                             permission_id: row.get(4)?,
-                            telegram_message_id: row.get(5)?,
+                            platform_message_id: row.get(5)?,
                             payload: row.get(6)?,
                             resolved: row.get::<_, i32>(7)? != 0,
                             created_at: row.get(8)?,
@@ -409,7 +447,7 @@ mod tests {
 
         let session = Session {
             id: "test-1".to_string(),
-            chat_id: 12345,
+            chat_id: "12345".to_string(),
             agent: "claude-code".to_string(),
             prompt: "fix the bug".to_string(),
             repo_url: Some("https://github.com/org/repo".to_string()),
@@ -425,7 +463,7 @@ mod tests {
 
         let fetched = repo.get_session("test-1").await.unwrap().unwrap();
         assert_eq!(fetched.id, "test-1");
-        assert_eq!(fetched.chat_id, 12345);
+        assert_eq!(fetched.chat_id, "12345");
         assert_eq!(fetched.agent, "claude-code");
         assert_eq!(fetched.status, SessionStatus::Pending);
     }
@@ -436,7 +474,7 @@ mod tests {
 
         let session = Session {
             id: "test-2".to_string(),
-            chat_id: 12345,
+            chat_id: "12345".to_string(),
             agent: "claude-code".to_string(),
             prompt: "fix".to_string(),
             repo_url: None,
@@ -463,7 +501,7 @@ mod tests {
 
         let session = Session {
             id: "test-2b".to_string(),
-            chat_id: 12345,
+            chat_id: "12345".to_string(),
             agent: "claude-code".to_string(),
             prompt: "fix".to_string(),
             repo_url: None,
@@ -493,7 +531,7 @@ mod tests {
 
         let session = Session {
             id: "test-2c".to_string(),
-            chat_id: 12345,
+            chat_id: "12345".to_string(),
             agent: "claude-code".to_string(),
             prompt: "fix".to_string(),
             repo_url: None,
@@ -528,7 +566,7 @@ mod tests {
         ] {
             let session = Session {
                 id: id.to_string(),
-                chat_id: 100,
+                chat_id: "100".to_string(),
                 agent: "claude-code".to_string(),
                 prompt: "test".to_string(),
                 repo_url: None,
@@ -542,7 +580,7 @@ mod tests {
             repo.create_session(&session).await.unwrap();
         }
 
-        let active = repo.get_active_sessions_for_chat(100).await.unwrap();
+        let active = repo.get_active_sessions_for_chat("100").await.unwrap();
         assert_eq!(active.len(), 2);
     }
 
@@ -552,7 +590,7 @@ mod tests {
 
         let session = Session {
             id: "s1".to_string(),
-            chat_id: 100,
+            chat_id: "100".to_string(),
             agent: "claude-code".to_string(),
             prompt: "test".to_string(),
             repo_url: None,
@@ -571,7 +609,7 @@ mod tests {
             kind: InteractionKind::Question,
             question_id: Some("q-1".to_string()),
             permission_id: None,
-            telegram_message_id: Some(999),
+            platform_message_id: Some("999".to_string()),
             payload: Some(r#"{"text":"Which file?"}"#.to_string()),
             resolved: false,
             created_at: "2024-01-01T00:00:00".to_string(),
@@ -594,7 +632,7 @@ mod tests {
 
         let session = Session {
             id: "s1".to_string(),
-            chat_id: 100,
+            chat_id: "100".to_string(),
             agent: "claude-code".to_string(),
             prompt: "test".to_string(),
             repo_url: None,

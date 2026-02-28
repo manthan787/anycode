@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -13,14 +12,16 @@ use anycode_core::infra::docker::DockerProvider;
 use anycode_core::infra::ecs::{EcsFargateProvider, EcsProviderConfig};
 use anycode_core::infra::provider::AnySandboxProvider;
 use anycode_core::messaging::telegram::TelegramProvider;
+use anycode_core::messaging::slack::SlackProvider;
+use anycode_core::messaging::MessagingProvider;
 use anycode_core::session::manager::SessionWatchdog;
 
 #[derive(Parser)]
-#[command(name = "anycode", about = "Run coding agents from Telegram")]
+#[command(name = "anycode", about = "Run coding agents from Telegram and Slack")]
 struct Cli {
     /// Path to config file
     #[arg(short, long, default_value = "config.toml")]
-    config: PathBuf,
+    config: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -50,10 +51,6 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to initialize sandbox provider")?,
     );
 
-    // Initialize Telegram provider
-    let telegram = TelegramProvider::new(&config.telegram.bot_token);
-    let telegram = Arc::new(telegram);
-
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -68,32 +65,73 @@ async fn main() -> anyhow::Result<()> {
         watchdog.run().await;
     });
 
-    // Start bridge
-    let bridge = Arc::new(Bridge::new(
-        config.clone(),
-        Arc::clone(&telegram),
-        Arc::clone(&sandbox_provider),
-        repo.clone(),
-    ));
+    // Build bridges for each configured platform
+    let mut bridges: Vec<Arc<Bridge<AnySandboxProvider>>> = Vec::new();
 
-    let bridge_clone = Arc::clone(&bridge);
+    if let Some(ref tg_config) = config.telegram {
+        info!("Initializing Telegram provider");
+        let telegram: Arc<dyn MessagingProvider> =
+            Arc::new(TelegramProvider::new(&tg_config.bot_token));
+        let bridge = Arc::new(Bridge::new(
+            config.clone(),
+            telegram,
+            Arc::clone(&sandbox_provider),
+            repo.clone(),
+            tg_config.allowed_users.clone(),
+        ));
+        bridges.push(bridge);
+    }
+
+    if let Some(ref slack_config) = config.slack {
+        info!("Initializing Slack provider");
+        let slack: Arc<dyn MessagingProvider> =
+            Arc::new(SlackProvider::new(&slack_config.app_token, &slack_config.bot_token));
+        let bridge = Arc::new(Bridge::new(
+            config.clone(),
+            slack,
+            Arc::clone(&sandbox_provider),
+            repo.clone(),
+            slack_config.allowed_users.clone(),
+        ));
+        bridges.push(bridge);
+    }
+
+    if bridges.is_empty() {
+        anyhow::bail!("No messaging platforms configured");
+    }
 
     // Handle SIGTERM/SIGINT for graceful shutdown
-    let shutdown_bridge = Arc::clone(&bridge);
+    let shutdown_bridges: Vec<_> = bridges.iter().map(Arc::clone).collect();
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for ctrl_c");
         info!("Received shutdown signal");
         let _ = shutdown_tx.send(true);
-        if let Err(e) = shutdown_bridge.shutdown().await {
-            error!("Error during shutdown: {e}");
+        for bridge in &shutdown_bridges {
+            if let Err(e) = bridge.shutdown().await {
+                error!("Error during shutdown: {e}");
+            }
         }
     });
 
+    // Spawn all bridges concurrently
+    let mut join_set = tokio::task::JoinSet::new();
+    for bridge in bridges {
+        join_set.spawn(async move {
+            if let Err(e) = bridge.run().await {
+                error!("Bridge error: {e}");
+            }
+        });
+    }
+
     info!("Anycode daemon started");
-    if let Err(e) = bridge_clone.run().await {
-        error!("Bridge error: {e}");
+
+    // Wait for all bridges to finish
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            error!("Bridge task panicked: {e}");
+        }
     }
 
     watchdog_handle.abort();
