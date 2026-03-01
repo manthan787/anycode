@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["crates/anycode-core", "crates/anycode-bin"]
+members = ["crates/anycode-core", "crates/anycode-bin", "crates/anycode-setup"]
