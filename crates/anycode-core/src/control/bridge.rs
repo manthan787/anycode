@@ -564,13 +564,18 @@ async fn run_session<S: SandboxProvider>(
         .await?;
 
     // 1. Create sandbox container
-    let env = bridge
+    let mut env = bridge
         .config
         .agents
         .credentials
         .get(&session.agent)
         .map(|c| c.env.clone())
         .unwrap_or_default();
+
+    if let Some(ref gh) = bridge.config.github {
+        env.entry("GITHUB_TOKEN".to_string())
+            .or_insert_with(|| gh.token.clone());
+    }
 
     let sandbox_config = crate::infra::SandboxConfig {
         image: bridge.config.docker.image.clone(),
@@ -1146,6 +1151,7 @@ mod tests {
                 default_agent: "claude-code".to_string(),
                 credentials: HashMap::new(),
             },
+            github: None,
             session: SessionConfig::default(),
         };
 
@@ -1184,6 +1190,7 @@ mod tests {
                 default_agent: "claude-code".to_string(),
                 credentials: HashMap::new(),
             },
+            github: None,
             session: SessionConfig::default(),
         };
 
