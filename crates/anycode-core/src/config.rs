@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub ecs: EcsConfig,
     pub database: DatabaseConfig,
     pub agents: AgentsConfig,
+    pub github: Option<GitHubConfig>,
     #[serde(default)]
     pub session: SessionConfig,
 }
@@ -127,6 +128,11 @@ pub struct AgentsConfig {
 pub struct AgentCredentials {
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubConfig {
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

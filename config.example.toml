@@ -54,6 +54,11 @@ env = { OPENAI_API_KEY = "sk-..." }
 # [agents.credentials.goose]
 # env = { OPENAI_API_KEY = "sk-..." }
 
+# --- GitHub (optional) ---
+# Provides gh CLI and git credential auth inside sandbox containers.
+# [github]
+# token = "ghp_..."
+
 [session]
 max_concurrent = 5
 timeout_minutes = 30
