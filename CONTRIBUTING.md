@@ -17,12 +17,13 @@ cargo test
 
 ## Project Structure
 
-Anycode is a Cargo workspace with two crates:
+Anycode is a Cargo workspace with three crates:
 
 - **`anycode-core`** &mdash; library crate with all business logic (config, DB, messaging, infra, sandbox, control, session)
 - **`anycode-bin`** &mdash; binary crate with CLI entrypoint
+- **`anycode-setup`** &mdash; interactive TUI setup wizard (ratatui/crossterm, no dependency on `anycode-core`)
 
-All traits, types, and implementations live in `anycode-core`. The binary just wires things together and starts the daemon.
+All traits, types, and implementations live in `anycode-core`. The binary just wires things together and starts the daemon. The setup wizard is a standalone tool that generates `config.toml` and runs the build.
 
 See [agents.md](agents.md) for detailed architecture documentation.
 

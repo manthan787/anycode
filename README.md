@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">Anycode</h1>
   <p align="center">
-    <strong>Run any coding agent from Telegram.</strong>
+    <strong>Run any coding agent from Telegram or Slack.</strong>
   </p>
   <p align="center">
     Dispatch tasks to Claude Code, Codex, or Goose from a chat message.<br>
@@ -24,7 +24,7 @@
 
 No single tool lets you dispatch coding tasks from a messaging app, spin up a sandboxed agent, get streaming output, answer the agent's questions interactively, and tear everything down automatically. Anycode does.
 
-- **Message-driven** &mdash; start tasks from Telegram (Slack/Discord planned)
+- **Message-driven** &mdash; start tasks from Telegram or Slack
 - **Agent-agnostic** &mdash; Claude Code, Codex, Goose, or any agent behind Rivet's Sandbox Agent SDK
 - **Fully sandboxed** &mdash; each task runs in an ephemeral Docker container or ECS Fargate task
 - **Bidirectional** &mdash; questions and permission requests appear as inline buttons; your replies go back to the agent
@@ -39,7 +39,7 @@ No single tool lets you dispatch coding tasks from a messaging app, spin up a sa
 - **Rust** 1.75+ (for building)
 - **Docker** running locally (if `sandbox.provider = "docker"`)
 - **AWS account + IAM credentials** (if `sandbox.provider = "ecs"`)
-- A **Telegram Bot Token** (get one from [@BotFather](https://t.me/BotFather))
+- A **Telegram Bot Token** (from [@BotFather](https://t.me/BotFather)) and/or **Slack App + Bot Tokens** (at least one platform required)
 - API keys for at least one agent (e.g. `ANTHROPIC_API_KEY` for Claude Code)
 
 ### 1. Clone and build
@@ -50,15 +50,30 @@ cd anycode
 cargo build --release
 ```
 
-### 2. Build the sandbox image
+### 2. Interactive setup (recommended)
+
+The setup wizard walks you through configuring messaging platforms, sandbox providers, agent credentials, and builds everything automatically:
 
 ```bash
-docker build -f docker/Dockerfile.agent -t anycode-sandbox:latest .
+cargo run --bin anycode-setup
 ```
 
-### 3. Configure
+The wizard will:
+- Check that Rust, Cargo, and Docker are available
+- Guide you through Telegram and/or Slack configuration
+- Configure Docker or ECS Fargate sandbox settings
+- Set up agent selection and API keys
+- Write `config.toml` and run `cargo build --release` + `docker build` for you
+
+### 2b. Manual setup (alternative)
+
+If you prefer to configure manually:
 
 ```bash
+# Build the sandbox image
+docker build -f docker/Dockerfile.agent -t anycode-sandbox:latest .
+
+# Copy and edit the config
 cp config.example.toml config.toml
 ```
 
@@ -72,7 +87,7 @@ bot_token = "123456:ABC-DEF..."
 env = { ANTHROPIC_API_KEY = "sk-ant-..." }
 ```
 
-### 4. Run
+### 3. Run
 
 ```bash
 ./target/release/anycode --config config.toml
@@ -141,10 +156,19 @@ Each session is fully isolated: its own container/task, its own API endpoint, an
 
 ## Configuration
 
+> **Tip**: Run `cargo run --bin anycode-setup` to generate `config.toml` interactively instead of editing by hand.
+
 ```toml
+# At least one messaging platform must be configured.
+
 [telegram]
 bot_token = "YOUR_BOT_TOKEN"           # Required
 allowed_users = []                      # Telegram user IDs (empty = allow all)
+
+[slack]
+app_token = "xapp-..."                 # App-level token with connections:write scope
+bot_token = "xoxb-..."                 # Bot token with chat:write, files:write scopes
+allowed_users = []                      # Slack user IDs (empty = allow all)
 
 [sandbox]
 provider = "docker"                     # "docker" or "ecs"
@@ -212,12 +236,13 @@ anycode/
 │   │   ├── config.rs           TOML config parsing + validation
 │   │   ├── error.rs            Unified error types (thiserror)
 │   │   ├── db/                 SQLite persistence (tokio-rusqlite)
-│   │   ├── messaging/          MessagingProvider trait + Telegram impl
+│   │   ├── messaging/          MessagingProvider trait + Telegram/Slack impls
 │   │   ├── infra/              SandboxProvider trait + Docker/ECS impls
 │   │   ├── sandbox/            HTTP client + SSE stream for sandbox agent
-│   │   ├── control/            Telegram ↔ Sandbox bridge orchestration
+│   │   ├── control/            Messaging ↔ Sandbox bridge orchestration
 │   │   └── session/            Timeout watchdog + orphan cleanup
-│   └── anycode-bin/            CLI entrypoint (clap + tracing)
+│   ├── anycode-bin/            CLI entrypoint (clap + tracing)
+│   └── anycode-setup/          Interactive TUI setup wizard (ratatui)
 ├── migrations/                 SQLite schema
 ├── docker/                     Sandbox container image
 └── config.example.toml
@@ -228,7 +253,7 @@ anycode/
 The two core extension points are traits, making it straightforward to add new messaging platforms or infrastructure backends:
 
 **`MessagingProvider`** &mdash; send/edit messages, handle callbacks, subscribe to events, upload files.
-Currently implemented for Telegram. Extensible to Slack, Discord, Matrix.
+Currently implemented for Telegram and Slack. Extensible to Discord, Matrix, and others.
 
 **`SandboxProvider`** &mdash; create/destroy sandboxes, health check, fetch logs.
 Currently implemented for Docker and AWS ECS Fargate. Extensible to Kubernetes and other backends.
@@ -281,19 +306,24 @@ cargo test
 # Run with debug logging
 RUST_LOG=debug cargo run -- --config config.toml
 
+# Launch the setup wizard
+cargo run --bin anycode-setup
+
 # Check compilation
 cargo check
 ```
 
 ### Tests
 
-33 unit tests covering config validation (including ECS), database CRUD, bridge behavior, message splitting, URL extraction, delta buffering, and infra helpers. All tests use in-memory SQLite and are fully isolated.
+Unit tests covering config validation (including ECS), database CRUD, bridge behavior, message splitting, URL extraction, delta buffering, infra helpers, and config generation. All tests use in-memory SQLite and are fully isolated.
 
 ---
 
 ## Roadmap
 
-- [ ] Slack and Discord messaging providers
+- [x] Slack messaging provider
+- [x] Interactive TUI setup wizard
+- [ ] Discord messaging provider
 - [ ] Kubernetes sandbox provider
 - [ ] ACP (JSON-RPC) protocol support alongside OpenCode REST
 - [ ] Git repo cloning into sandbox (private repos via token)
@@ -310,5 +340,5 @@ MIT
 ---
 
 <p align="center">
-  Built with Rust, tokio, teloxide, and bollard.
+  Built with Rust, tokio, teloxide, bollard, and ratatui.
 </p>
