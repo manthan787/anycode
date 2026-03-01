@@ -18,6 +18,7 @@ enum SubState {
     DefaultAgent,
     AnthropicKey,
     OpenaiKey,
+    GitHubToken,
 }
 
 pub struct AgentsStep {
@@ -26,6 +27,7 @@ pub struct AgentsStep {
     default_agent: SelectList,
     anthropic_key: TextInput,
     openai_key: TextInput,
+    github_token: TextInput,
 }
 
 impl AgentsStep {
@@ -39,6 +41,7 @@ impl AgentsStep {
             default_agent: SelectList::new("Select default agent:", vec![]),
             anthropic_key: TextInput::new("ANTHROPIC_API_KEY:").masked(),
             openai_key: TextInput::new("OPENAI_API_KEY:").masked(),
+            github_token: TextInput::new("GitHub Token (optional, for repo access):").masked(),
         }
     }
 
@@ -51,6 +54,7 @@ impl AgentsStep {
         }
         data.anthropic_api_key = self.anthropic_key.value.clone();
         data.openai_api_key = self.openai_key.value.clone();
+        data.github_token = self.github_token.value.clone();
     }
 
     fn load_from_data(&mut self, data: &WizardData) {
@@ -59,6 +63,7 @@ impl AgentsStep {
         self.agent_select.checked[2] = data.enable_goose;
         self.anthropic_key = TextInput::new("ANTHROPIC_API_KEY:").masked().with_value(&data.anthropic_api_key);
         self.openai_key = TextInput::new("OPENAI_API_KEY:").masked().with_value(&data.openai_api_key);
+        self.github_token = TextInput::new("GitHub Token (optional, for repo access):").masked().with_value(&data.github_token);
         self.rebuild_default_list(data);
     }
 
@@ -136,7 +141,7 @@ impl Step for AgentsStep {
                     if data.needs_openai_key() {
                         self.sub_state = SubState::OpenaiKey;
                     } else {
-                        return StepAction::NextStep;
+                        self.sub_state = SubState::GitHubToken;
                     }
                     StepAction::Nothing
                 }
@@ -156,7 +161,8 @@ impl Step for AgentsStep {
                         return StepAction::Nothing;
                     }
                     self.save_to_data(data);
-                    StepAction::NextStep
+                    self.sub_state = SubState::GitHubToken;
+                    StepAction::Nothing
                 }
                 KeyCode::Esc => {
                     if data.needs_anthropic_key() {
@@ -168,6 +174,26 @@ impl Step for AgentsStep {
                 }
                 _ => {
                     self.openai_key.handle_key(key);
+                    StepAction::Nothing
+                }
+            },
+            SubState::GitHubToken => match key.code {
+                KeyCode::Enter => {
+                    self.save_to_data(data);
+                    StepAction::NextStep
+                }
+                KeyCode::Esc => {
+                    if data.needs_openai_key() {
+                        self.sub_state = SubState::OpenaiKey;
+                    } else if data.needs_anthropic_key() {
+                        self.sub_state = SubState::AnthropicKey;
+                    } else {
+                        self.sub_state = SubState::DefaultAgent;
+                    }
+                    StepAction::Nothing
+                }
+                _ => {
+                    self.github_token.handle_key(key);
                     StepAction::Nothing
                 }
             },
@@ -219,6 +245,24 @@ impl Step for AgentsStep {
                     ..content_area
                 };
                 frame.render_widget(TextInputWidget::new(&self.openai_key, true), input_area);
+            }
+            SubState::GitHubToken => {
+                let note_lines = vec![
+                    Line::from(Span::styled(
+                        "Enables gh CLI and git HTTPS auth inside sandboxes (press Enter to skip)",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(""),
+                ];
+                let note = ratatui::widgets::Paragraph::new(note_lines);
+                frame.render_widget(note, content_area);
+
+                let input_area = Rect {
+                    y: content_area.y + 2,
+                    height: content_area.height.saturating_sub(2),
+                    ..content_area
+                };
+                frame.render_widget(TextInputWidget::new(&self.github_token, true), input_area);
             }
         }
     }

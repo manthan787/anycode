@@ -96,6 +96,13 @@ pub fn generate_config(data: &WizardData) -> String {
         out.push('\n');
     }
 
+    // GitHub
+    if !data.github_token.is_empty() {
+        out.push_str("[github]\n");
+        out.push_str(&format!("token = {}\n", toml_string(&data.github_token)));
+        out.push('\n');
+    }
+
     // Session
     out.push_str("[session]\n");
     out.push_str("max_concurrent = 5\n");

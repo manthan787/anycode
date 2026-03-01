@@ -29,6 +29,7 @@ pub struct WizardData {
     pub default_agent: String,
     pub anthropic_api_key: String,
     pub openai_api_key: String,
+    pub github_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,7 @@ impl Default for WizardData {
             default_agent: "claude-code".into(),
             anthropic_api_key: String::new(),
             openai_api_key: String::new(),
+            github_token: String::new(),
         }
     }
 }
