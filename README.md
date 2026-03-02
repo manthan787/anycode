@@ -93,7 +93,7 @@ env = { ANTHROPIC_API_KEY = "sk-ant-..." }
 ./target/release/anycode --config config.toml
 ```
 
-### 5. Use it
+### 4. Use it
 
 Open your bot in Telegram and send:
 
@@ -209,6 +209,9 @@ env = { OPENAI_API_KEY = "sk-..." }
 [agents.credentials.goose]
 env = { OPENAI_API_KEY = "sk-..." }
 
+[github]
+token = "ghp_..."                       # Optional; enables gh CLI + git auth in sandbox
+
 [session]
 max_concurrent = 5                      # Max active sessions per chat
 timeout_minutes = 30                    # Auto-cancel after this duration
@@ -216,6 +219,10 @@ debounce_ms = 500                       # Streaming output flush interval
 ```
 
 Agent credentials are injected as environment variables into the sandbox at creation time. They are never baked into images. Keep `config.toml` out of version control.
+
+### GitHub Authentication
+
+Setting `[github] token` enables authenticated `git clone` and `gh` CLI access inside sandbox containers. The token is passed as an environment variable and configured by the container entrypoint—never written to disk in the image.
 
 ### ECS Fargate Notes
 
@@ -285,6 +292,7 @@ The default sandbox image (`docker/Dockerfile.agent`) is Ubuntu 24.04 with:
 - [Rivet Sandbox Agent](https://github.com/nichochar/open-agent-platform) SDK
 - [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) CLI
 - [Codex](https://www.npmjs.com/package/@openai/codex) CLI
+- [GitHub CLI](https://cli.github.com/) (`gh`) for authenticated git operations
 - Node.js 22, Python 3, git, build-essential
 
 Build it with:
@@ -326,7 +334,7 @@ Unit tests covering config validation (including ECS), database CRUD, bridge beh
 - [ ] Discord messaging provider
 - [ ] Kubernetes sandbox provider
 - [ ] ACP (JSON-RPC) protocol support alongside OpenCode REST
-- [ ] Git repo cloning into sandbox (private repos via token)
+- [x] Git repo cloning into sandbox (private repos via GitHub token)
 - [ ] File output as Telegram document uploads
 - [ ] Per-user rate limiting
 - [ ] Web dashboard for session monitoring

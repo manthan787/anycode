@@ -30,16 +30,19 @@ See [agents.md](agents.md) for detailed architecture documentation.
 ## Adding a New Messaging Provider
 
 1. Create `crates/anycode-core/src/messaging/your_provider.rs`
-2. Implement the `MessagingProvider` trait
+2. Implement the `MessagingProvider` trait (see `traits.rs` for the interface)
 3. Re-export from `messaging/mod.rs`
-4. Add config section and wire it up in `main.rs`
+4. Add config section in `config.rs` and wire it up in `main.rs`
+
+See existing implementations in `telegram.rs` and `slack.rs` for reference.
 
 ## Adding a New Sandbox Provider
 
 1. Create `crates/anycode-core/src/infra/your_provider.rs`
 2. Implement the `SandboxProvider` trait
-3. Re-export from `infra/mod.rs`
-4. Add config section and wire it up in `main.rs`
+3. Add a variant to `AnySandboxProvider` in `infra/provider.rs`
+4. Re-export from `infra/mod.rs`
+5. Add config section in `config.rs` and wire it up in `main.rs`
 
 ## Code Style
 

@@ -2,7 +2,7 @@
 
 ## What is Anycode?
 
-A Rust daemon that bridges Telegram messaging with isolated coding agent sandboxes (Claude Code, Codex, Goose). Users dispatch `/task` commands from Telegram; Anycode spins up a sandbox (Docker locally or ECS Fargate in cloud) running the agent, streams output back, handles bidirectional Q&A via inline buttons, and tears down the sandbox when done.
+A Rust daemon that bridges messaging platforms (Telegram and Slack) with isolated coding agent sandboxes (Claude Code, Codex, Goose). Users dispatch `/task` commands from chat; Anycode spins up a sandbox (Docker locally or ECS Fargate in cloud) running the agent, streams output back, handles bidirectional Q&A via inline buttons, and tears down the sandbox when done.
 
 ---
 
@@ -22,18 +22,28 @@ anycode-core/
 │   └── provider.rs    Runtime provider enum (Docker/ECS)
 ├── messaging/
 │   ├── traits.rs      MessagingProvider trait + event types
-│   └── telegram.rs    Teloxide-based Telegram bot
+│   ├── telegram.rs    Teloxide-based Telegram bot
+│   └── slack.rs       Slack Socket Mode (WebSocket) bot
 ├── sandbox/
 │   ├── types.rs       SandboxEvent enum (10 SSE event types)
 │   ├── client.rs      HTTP client for sandbox agent REST API
 │   └── stream.rs      SSE consumer with exponential backoff
 ├── control/
-│   └── bridge.rs      Core orchestration: Telegram <-> Sandbox Agent
+│   └── bridge.rs      Core orchestration: Messaging Platform <-> Sandbox Agent
 └── session/
     └── manager.rs     Background watchdog (timeouts, orphans)
 
 anycode-bin/
 └── main.rs            CLI entrypoint (clap, tracing, shutdown)
+
+anycode-setup/
+├── main.rs            TUI setup wizard entrypoint
+├── app.rs             Application state machine
+├── data.rs            Wizard data model
+├── config_gen.rs      TOML config generation
+├── runner.rs          Subprocess execution (build steps)
+├── steps/             Wizard step implementations (welcome → done)
+└── widgets/           Reusable TUI input widgets
 ```
 
 ---
@@ -43,13 +53,13 @@ anycode-bin/
 ### MessagingProvider
 ```rust
 pub trait MessagingProvider: Send + Sync + 'static {
-    async fn send_message(&self, msg: OutboundMessage) -> Result<i64>;
+    async fn send_message(&self, msg: OutboundMessage) -> Result<String>;
     async fn answer_callback(&self, query_id: &str, text: &str) -> Result<()>;
     async fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<InboundEvent>>;
-    async fn send_file(&self, chat_id: i64, filename: &str, data: Vec<u8>) -> Result<()>;
+    async fn send_file(&self, chat_id: &str, filename: &str, data: Vec<u8>) -> Result<()>;
 }
 ```
-Currently implemented: Telegram (teloxide). Adding Slack/Discord = just a new impl.
+Currently implemented: Telegram (teloxide) and Slack (Socket Mode). Adding Discord/Matrix = just a new impl.
 
 ### SandboxProvider
 ```rust
@@ -72,12 +82,12 @@ Currently implemented: Docker (bollard) and ECS Fargate (aws-sdk). Extensible to
 | `tokio::spawn` | Per-event handling, per-session lifecycle, SSE consumer, delta flusher |
 | `tokio::sync::Mutex` | Per-session DeltaBuffer (async-safe) |
 | `tokio::sync::watch` | Shutdown broadcast to all tasks |
-| `mpsc::unbounded_channel` | Telegram event subscription, SSE event delivery |
+| `mpsc::unbounded_channel` | Messaging platform event subscription, SSE event delivery |
 
 **Spawned tasks per session:**
 1. **Session lifecycle** (run_session) — owns container + event loop
 2. **SSE consumer** (spawn_event_consumer) — persistent HTTP connection, reconnects
-3. **Delta flusher** — periodic timer, flushes buffered output to Telegram
+3. **Delta flusher** — periodic timer, flushes buffered output to messaging platform
 
 All tasks terminate on session end or shutdown signal.
 
@@ -104,15 +114,15 @@ Pending → Starting → Running → Completed / Failed / Cancelled
 
 ## DeltaBuffer: Debounced Streaming Output
 
-Problem: Telegram rate-limits message edits. Agent produces many small text deltas.
+Problem: Messaging platforms rate-limit message edits. Agent produces many small text deltas.
 
 Solution: Buffer deltas, flush on a timer.
 
 - **Append**: `item.delta` events append text to buffer (non-blocking)
-- **Flush check**: Every `debounce_ms` (default 500ms), if buffer non-empty and debounce elapsed, send/edit Telegram message
-- **Message splitting**: When buffer exceeds ~3800 chars, start a new message (Telegram limit is 4096)
+- **Flush check**: Every `debounce_ms` (default 500ms), if buffer non-empty and debounce elapsed, send/edit message
+- **Message splitting**: When buffer exceeds ~3800 chars, start a new message (Telegram limit is 4096; Slack is more generous)
 - **Force flush**: On `item.completed`, immediately flush remaining buffer
-- **Markdown fallback**: Try MarkdownV2 edit first; on parse error, retry as plain text
+- **Markdown fallback**: Try MarkdownV2 first; on parse error, retry as plain text
 
 ---
 
@@ -181,7 +191,7 @@ pub enum AnycodeError {
 
 ## Configuration Philosophy
 
-**Minimal required config**: Just `telegram.bot_token` (with default `sandbox.provider = "docker"`).
+**Minimal required config**: At least one messaging platform (`telegram.bot_token` or `slack.app_token` + `slack.bot_token`), with default `sandbox.provider = "docker"`.
 
 Everything else has sensible defaults:
 - Sandbox provider: `docker`
@@ -204,7 +214,7 @@ When `sandbox.provider = "ecs"`, these are additionally required:
 
 ## Callback Data Protocol
 
-Telegram inline button callbacks encode interaction type and answer:
+Inline button callbacks encode interaction type and answer:
 
 ```
 q:<interaction_id>:<answer_value>   — question reply
