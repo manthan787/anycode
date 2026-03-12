@@ -1,19 +1,27 @@
 use std::time::Duration;
 
+use async_trait::async_trait;
 use reqwest::Client;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::error::{AnycodeError, Result};
 
+use super::agent_client::AgentClient;
+use super::stream::{spawn_event_consumer, StreamConfig};
 use super::types::*;
 
-/// HTTP client for communicating with the Sandbox Agent SDK API.
-pub struct SandboxClient {
+/// HTTP client for communicating with agents via the OpenCode REST/SSE protocol
+/// (Sandbox Agent SDK).
+pub struct OpenCodeClient {
     base_url: String,
     client: Client,
 }
 
-impl SandboxClient {
+/// Backwards-compatible alias.
+pub type SandboxClient = OpenCodeClient;
+
+impl OpenCodeClient {
     pub fn new(base_url: &str) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -25,8 +33,19 @@ impl SandboxClient {
         }
     }
 
-    /// Poll /v1/health until the sandbox agent is ready.
-    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
+    /// Get the SSE event stream URL for a session.
+    pub fn event_stream_url(&self) -> String {
+        format!("{}/opencode/event", self.base_url)
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+#[async_trait]
+impl AgentClient for OpenCodeClient {
+    async fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
         let start = tokio::time::Instant::now();
         let poll_interval = Duration::from_millis(500);
 
@@ -60,8 +79,7 @@ impl SandboxClient {
         }
     }
 
-    /// Create a new session in the sandbox agent.
-    pub async fn create_session(&self, id: &str, agent: Option<&str>) -> Result<()> {
+    async fn create_session(&self, id: &str, agent: Option<&str>) -> Result<()> {
         let req = CreateSessionRequest {
             id: id.to_string(),
             agent: agent.map(|s| s.to_string()),
@@ -85,8 +103,7 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Send a message to an existing session.
-    pub async fn send_message(&self, session_id: &str, text: &str) -> Result<()> {
+    async fn send_message(&self, session_id: &str, text: &str) -> Result<()> {
         let req = SendMessageRequest {
             message: text.to_string(),
         };
@@ -112,8 +129,7 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Reply to a question from the agent.
-    pub async fn reply_question(&self, question_id: &str, answer: &str) -> Result<()> {
+    async fn reply_question(&self, question_id: &str, answer: &str) -> Result<()> {
         let req = QuestionReplyRequest {
             answer: answer.to_string(),
         };
@@ -139,8 +155,7 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Reply to a permission request from the agent.
-    pub async fn reply_permission(&self, permission_id: &str, approved: bool) -> Result<()> {
+    async fn reply_permission(&self, permission_id: &str, approved: bool) -> Result<()> {
         let req = PermissionReplyRequest { approved };
 
         let resp = self
@@ -164,8 +179,7 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Destroy a session.
-    pub async fn destroy_session(&self, session_id: &str) -> Result<()> {
+    async fn destroy_session(&self, session_id: &str) -> Result<()> {
         let resp = self
             .client
             .delete(format!(
@@ -184,12 +198,8 @@ impl SandboxClient {
         Ok(())
     }
 
-    /// Get the SSE event stream URL for a session.
-    pub fn event_stream_url(&self) -> String {
-        format!("{}/opencode/event", self.base_url)
-    }
-
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    async fn subscribe_events(&self) -> Result<mpsc::UnboundedReceiver<Result<SandboxEvent>>> {
+        let url = self.event_stream_url();
+        Ok(spawn_event_consumer(url, StreamConfig::default()))
     }
 }

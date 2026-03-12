@@ -12,8 +12,7 @@ use crate::db::{
 use crate::error::Result;
 use crate::infra::SandboxProvider;
 use crate::messaging::{InboundEvent, MessagingProvider, OutboundMessage};
-use crate::sandbox::{SandboxClient, SandboxEvent};
-use crate::sandbox::stream::{spawn_event_consumer, StreamConfig};
+use crate::sandbox::{AgentClient, SandboxEvent};
 
 /// Buffers delta text and flushes to Telegram on a debounce timer.
 pub struct DeltaBuffer {
@@ -80,7 +79,7 @@ impl DeltaBuffer {
 /// Active session state tracked in memory.
 struct ActiveSession {
     session: Session,
-    sandbox_client: SandboxClient,
+    agent_client: Box<dyn AgentClient>,
     delta_buffer: tokio::sync::Mutex<DeltaBuffer>,
 }
 
@@ -219,7 +218,7 @@ impl<S: SandboxProvider> Bridge<S> {
                     get_pending_free_form_question(&unresolved)
                 {
                     active
-                        .sandbox_client
+                        .agent_client
                         .reply_question(&question_id, text)
                         .await?;
                     self.repo.resolve_pending_interaction(&pi_id).await?;
@@ -227,7 +226,7 @@ impl<S: SandboxProvider> Bridge<S> {
                 }
 
                 active
-                    .sandbox_client
+                    .agent_client
                     .send_message(&session_id, text)
                     .await?;
                 return Ok(());
@@ -271,14 +270,14 @@ impl<S: SandboxProvider> Bridge<S> {
             match kind {
                 "q" => {
                     if let Some(ref qid) = pi.question_id {
-                        active.sandbox_client.reply_question(qid, value).await?;
+                        active.agent_client.reply_question(qid, value).await?;
                     }
                 }
                 "p" => {
                     if let Some(ref pid) = pi.permission_id {
                         let approved = value == "yes";
                         active
-                            .sandbox_client
+                            .agent_client
                             .reply_permission(pid, approved)
                             .await?;
                     }
@@ -479,7 +478,7 @@ Button presses answer agent questions/permissions.";
 
     async fn cancel_session(&self, session_id: &str) -> Result<()> {
         if let Some((_, active)) = self.active_sessions.remove(session_id) {
-            let _ = active.sandbox_client.destroy_session(session_id).await;
+            let _ = active.agent_client.destroy_session(session_id).await;
             if let Some(ref sid) = active.session.sandbox_id {
                 let _ = self.sandbox_provider.destroy_sandbox(sid).await;
             }
@@ -577,11 +576,17 @@ async fn run_session<S: SandboxProvider>(
             .or_insert_with(|| gh.token.clone());
     }
 
+    let protocol = bridge.config.sandbox.protocol.clone();
     let sandbox_config = crate::infra::SandboxConfig {
         image: bridge.config.docker.image.clone(),
         agent: session.agent.clone(),
         env,
         repo_url: session.repo_url.clone(),
+        protocol: if protocol == "acpx" {
+            Some(protocol.clone())
+        } else {
+            None
+        },
     };
 
     let handle = match bridge.sandbox_provider.create_sandbox(sandbox_config).await {
@@ -604,10 +609,23 @@ async fn run_session<S: SandboxProvider>(
     session.sandbox_id = Some(handle.sandbox_id.clone());
     session.sandbox_port = Some(handle.port as i64);
 
-    // 2. Wait for sandbox agent to be ready
-    let client = SandboxClient::new(&handle.api_url);
+    // 2. Create the agent client based on protocol
+    let client: Box<dyn AgentClient> = match protocol.as_str() {
+        "acpx" => {
+            let docker = bollard::Docker::connect_with_local_defaults()
+                .map_err(crate::error::AnycodeError::Docker)?;
+            Box::new(crate::sandbox::acpx::AcpxClient::new(
+                docker,
+                handle.sandbox_id.clone(),
+                session.agent.clone(),
+            ))
+        }
+        _ => Box::new(crate::sandbox::OpenCodeClient::new(&handle.api_url)),
+    };
+
+    // 3. Wait for agent to be ready
     if let Err(e) = client.wait_for_ready(Duration::from_secs(60)).await {
-        error!("Sandbox agent not ready: {e}");
+        error!("Agent not ready: {e}");
         let _ = bridge.sandbox_provider.destroy_sandbox(&handle.sandbox_id).await;
         bridge
             .repo
@@ -617,12 +635,12 @@ async fn run_session<S: SandboxProvider>(
         return Err(e);
     }
 
-    // 3. Create session in sandbox agent
+    // 4. Create session in agent
     if let Err(e) = client
         .create_session(&session_id, Some(&session.agent))
         .await
     {
-        error!("Failed to create sandbox session: {e}");
+        error!("Failed to create agent session: {e}");
         let _ = bridge.sandbox_provider.destroy_sandbox(&handle.sandbox_id).await;
         bridge
             .repo
@@ -637,16 +655,19 @@ async fn run_session<S: SandboxProvider>(
         .update_session_api_id(&session_id, &session_id)
         .await?;
 
-    // 4. Update status to running
+    // 5. Update status to running
     bridge
         .repo
         .update_session_status(&session_id, SessionStatus::Running)
         .await?;
 
-    // 5. Track active session
+    // 6. Subscribe to events before tracking the session
+    let mut event_rx = client.subscribe_events().await?;
+
+    // 7. Track active session
     let active = Arc::new(ActiveSession {
         session: session.clone(),
-        sandbox_client: SandboxClient::new(&handle.api_url),
+        agent_client: client,
         delta_buffer: tokio::sync::Mutex::new(DeltaBuffer::new(
             bridge.config.session.debounce_ms,
         )),
@@ -657,9 +678,9 @@ async fn run_session<S: SandboxProvider>(
         .insert(session_id.clone(), Arc::clone(&active));
     bridge.chat_sessions.insert(chat_id.clone(), session_id.clone());
 
-    // 6. Send prompt
+    // 8. Send prompt
     if let Err(e) = active
-        .sandbox_client
+        .agent_client
         .send_message(&session_id, &session.prompt)
         .await
     {
@@ -668,10 +689,6 @@ async fn run_session<S: SandboxProvider>(
         send_text(&bridge.messaging, &chat_id, &format!("Failed to send prompt: {e}")).await?;
         return Err(e);
     }
-
-    // 7. Consume SSE events
-    let event_url = active.sandbox_client.event_stream_url();
-    let mut event_rx = spawn_event_consumer(event_url, StreamConfig::default());
 
     // Spawn a debounce flusher
     let flush_active = Arc::clone(&active);

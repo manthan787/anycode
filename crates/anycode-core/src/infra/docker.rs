@@ -118,6 +118,10 @@ impl SandboxProvider for DockerProvider {
             env_vars.push(format!("ANYCODE_REPO={repo}"));
         }
 
+        if let Some(ref protocol) = config.protocol {
+            env_vars.push(format!("ANYCODE_PROTOCOL={protocol}"));
+        }
+
         let container_port = "2468/tcp";
         let host_config = build_host_config(port, container_port, &self.network);
 

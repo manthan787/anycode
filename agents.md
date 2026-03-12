@@ -25,8 +25,10 @@ anycode-core/
 │   ├── telegram.rs    Teloxide-based Telegram bot
 │   └── slack.rs       Slack Socket Mode (WebSocket) bot
 ├── sandbox/
+│   ├── agent_client.rs AgentClient trait (protocol abstraction)
 │   ├── types.rs       SandboxEvent enum (10 SSE event types)
-│   ├── client.rs      HTTP client for sandbox agent REST API
+│   ├── client.rs      OpenCodeClient: HTTP/SSE via sandbox agent REST API
+│   ├── acpx.rs        AcpxClient: NDJSON via docker exec + acpx CLI
 │   └── stream.rs      SSE consumer with exponential backoff
 ├── control/
 │   └── bridge.rs      Core orchestration: Messaging Platform <-> Sandbox Agent
@@ -72,6 +74,20 @@ pub trait SandboxProvider: Send + Sync + 'static {
 ```
 Currently implemented: Docker (bollard) and ECS Fargate (aws-sdk). Extensible to Kubernetes, EC2, E2B, etc.
 
+### AgentClient
+```rust
+pub trait AgentClient: Send + Sync {
+    async fn wait_for_ready(&self, timeout: Duration) -> Result<()>;
+    async fn create_session(&self, id: &str, agent: Option<&str>) -> Result<()>;
+    async fn send_message(&self, session_id: &str, text: &str) -> Result<()>;
+    async fn reply_question(&self, question_id: &str, answer: &str) -> Result<()>;
+    async fn reply_permission(&self, permission_id: &str, approved: bool) -> Result<()>;
+    async fn destroy_session(&self, session_id: &str) -> Result<()>;
+    async fn subscribe_events(&self) -> Result<mpsc::UnboundedReceiver<Result<SandboxEvent>>>;
+}
+```
+Currently implemented: OpenCodeClient (REST/SSE via sandbox-agent) and AcpxClient (NDJSON via docker exec + acpx). Selected via `sandbox.protocol` config.
+
 ---
 
 ## Concurrency Model
@@ -101,9 +117,9 @@ Pending → Starting → Running → Completed / Failed / Cancelled
 
 1. `/task` received → create Session (Pending)
 2. SandboxProvider.create_sandbox() → container/task starts (Starting)
-3. SandboxClient.wait_for_ready() → poll /v1/health (60s timeout)
-4. SandboxClient.create_session() + send_message() → agent working (Running)
-5. SSE events stream back: deltas → Telegram edits, questions → inline buttons
+3. AgentClient.wait_for_ready() → poll health/check binary (60s timeout)
+4. AgentClient.create_session() + send_message() → agent working (Running)
+5. Events stream back (SSE or NDJSON): deltas → Telegram edits, questions → inline buttons
 6. session.ended or error → cleanup sandbox, update DB (Completed/Failed)
 
 **Cancellation**: `/cancel` → remove from DashMap, destroy sandbox, mark Cancelled.
@@ -195,6 +211,7 @@ pub enum AnycodeError {
 
 Everything else has sensible defaults:
 - Sandbox provider: `docker`
+- Agent protocol: `opencode` (alternative: `acpx`)
 - Docker image: `anycode-sandbox:latest`
 - Port range: 12000-12100
 - Database: `anycode.db`

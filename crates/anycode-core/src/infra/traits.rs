@@ -10,6 +10,7 @@ pub struct SandboxConfig {
     pub agent: String,
     pub env: HashMap<String, String>,
     pub repo_url: Option<String>,
+    pub protocol: Option<String>,
 }
 
 /// Handle returned after sandbox creation.

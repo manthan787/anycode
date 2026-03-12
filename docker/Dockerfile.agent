@@ -34,6 +34,9 @@ RUN npm install -g @anthropic-ai/claude-code
 # Install Codex CLI
 RUN npm install -g @openai/codex
 
+# Install acpx (headless ACP client)
+RUN npm install -g acpx
+
 # Install sandbox-agent
 RUN curl -fsSL https://raw.githubusercontent.com/nichochar/open-agent-platform/main/install.sh | bash \
     || echo "sandbox-agent install script not available, will install manually"

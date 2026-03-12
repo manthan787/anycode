@@ -11,4 +11,9 @@ if [ -n "$ANYCODE_REPO" ]; then
     cd /workspace/repo
 fi
 
-exec sandbox-agent server --host 0.0.0.0 --port 2468 --no-token
+if [ "$ANYCODE_PROTOCOL" = "acpx" ]; then
+    echo "acpx mode: ready for docker exec"
+    exec tail -f /dev/null
+else
+    exec sandbox-agent server --host 0.0.0.0 --port 2468 --no-token
+fi

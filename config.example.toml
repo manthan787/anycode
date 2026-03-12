@@ -16,6 +16,9 @@ allowed_users = []
 [sandbox]
 # "docker" (local) or "ecs" (AWS Fargate)
 provider = "docker"
+# "opencode" (REST/SSE via sandbox-agent) or "acpx" (headless ACP client via docker exec)
+# acpx requires provider = "docker" (ECS exec not supported yet)
+protocol = "opencode"
 
 [docker]
 image = "anycode-sandbox:latest"

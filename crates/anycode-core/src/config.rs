@@ -23,12 +23,15 @@ pub struct AppConfig {
 pub struct SandboxRuntimeConfig {
     #[serde(default = "default_sandbox_provider")]
     pub provider: String,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
 }
 
 impl Default for SandboxRuntimeConfig {
     fn default() -> Self {
         Self {
             provider: default_sandbox_provider(),
+            protocol: default_protocol(),
         }
     }
 }
@@ -161,6 +164,9 @@ fn default_image() -> String {
 fn default_sandbox_provider() -> String {
     "docker".to_string()
 }
+fn default_protocol() -> String {
+    "opencode".to_string()
+}
 fn default_port_start() -> u16 {
     12000
 }
@@ -232,6 +238,19 @@ impl AppConfig {
                     "slack.bot_token is required".into(),
                 ));
             }
+        }
+        match self.sandbox.protocol.as_str() {
+            "opencode" | "acpx" => {}
+            other => {
+                return Err(AnycodeError::Config(format!(
+                    "unsupported sandbox.protocol \"{other}\" (expected \"opencode\" or \"acpx\")"
+                )));
+            }
+        }
+        if self.sandbox.protocol == "acpx" && self.sandbox.provider != "docker" {
+            return Err(AnycodeError::Config(
+                "sandbox.protocol = \"acpx\" requires sandbox.provider = \"docker\" (ECS exec not supported yet)".into(),
+            ));
         }
         match self.sandbox.provider.as_str() {
             "docker" => {

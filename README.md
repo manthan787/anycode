@@ -25,7 +25,7 @@
 No single tool lets you dispatch coding tasks from a messaging app, spin up a sandboxed agent, get streaming output, answer the agent's questions interactively, and tear everything down automatically. Anycode does.
 
 - **Message-driven** &mdash; start tasks from Telegram or Slack
-- **Agent-agnostic** &mdash; Claude Code, Codex, Goose, or any agent behind Rivet's Sandbox Agent SDK
+- **Agent-agnostic** &mdash; Claude Code, Codex, Goose, or any agent behind Rivet's Sandbox Agent SDK or [acpx](https://github.com/openclaw/acpx)
 - **Fully sandboxed** &mdash; each task runs in an ephemeral Docker container or ECS Fargate task
 - **Bidirectional** &mdash; questions and permission requests appear as inline buttons; your replies go back to the agent
 - **Streaming** &mdash; see the agent's output as it types, debounced to avoid rate limits
@@ -172,6 +172,7 @@ allowed_users = []                      # Slack user IDs (empty = allow all)
 
 [sandbox]
 provider = "docker"                     # "docker" or "ecs"
+protocol = "opencode"                   # "opencode" (REST/SSE) or "acpx" (headless ACP)
 
 [docker]
 image = "anycode-sandbox:latest"        # Sandbox container image
@@ -245,7 +246,7 @@ anycode/
 │   │   ├── db/                 SQLite persistence (tokio-rusqlite)
 │   │   ├── messaging/          MessagingProvider trait + Telegram/Slack impls
 │   │   ├── infra/              SandboxProvider trait + Docker/ECS impls
-│   │   ├── sandbox/            HTTP client + SSE stream for sandbox agent
+│   │   ├── sandbox/            AgentClient trait + OpenCode/acpx implementations
 │   │   ├── control/            Messaging ↔ Sandbox bridge orchestration
 │   │   └── session/            Timeout watchdog + orphan cleanup
 │   ├── anycode-bin/            CLI entrypoint (clap + tracing)
@@ -257,13 +258,16 @@ anycode/
 
 ### Trait abstractions
 
-The two core extension points are traits, making it straightforward to add new messaging platforms or infrastructure backends:
+The three core extension points are traits, making it straightforward to add new messaging platforms, infrastructure backends, or agent protocols:
 
 **`MessagingProvider`** &mdash; send/edit messages, handle callbacks, subscribe to events, upload files.
 Currently implemented for Telegram and Slack. Extensible to Discord, Matrix, and others.
 
 **`SandboxProvider`** &mdash; create/destroy sandboxes, health check, fetch logs.
 Currently implemented for Docker and AWS ECS Fargate. Extensible to Kubernetes and other backends.
+
+**`AgentClient`** &mdash; abstract agent communication (wait, create session, send message, subscribe events).
+Currently implemented for OpenCode (REST/SSE) and acpx (NDJSON via docker exec). Selected via `sandbox.protocol`.
 
 ### Concurrency model
 
@@ -290,6 +294,7 @@ Agent output arrives as many small SSE `item.delta` events. Sending each one as 
 The default sandbox image (`docker/Dockerfile.agent`) is Ubuntu 24.04 with:
 
 - [Rivet Sandbox Agent](https://github.com/nichochar/open-agent-platform) SDK
+- [acpx](https://github.com/openclaw/acpx) headless ACP client
 - [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) CLI
 - [Codex](https://www.npmjs.com/package/@openai/codex) CLI
 - [GitHub CLI](https://cli.github.com/) (`gh`) for authenticated git operations
@@ -333,7 +338,7 @@ Unit tests covering config validation (including ECS), database CRUD, bridge beh
 - [x] Interactive TUI setup wizard
 - [ ] Discord messaging provider
 - [ ] Kubernetes sandbox provider
-- [ ] ACP (JSON-RPC) protocol support alongside OpenCode REST
+- [x] ACP protocol support via acpx alongside OpenCode REST
 - [x] Git repo cloning into sandbox (private repos via GitHub token)
 - [ ] File output as Telegram document uploads
 - [ ] Per-user rate limiting
